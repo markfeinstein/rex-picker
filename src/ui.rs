@@ -1,4 +1,8 @@
-use std::{io, time::Duration};
+use std::{
+    fs::OpenOptions,
+    io::{self, Write},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -40,33 +44,49 @@ pub fn run_picker(document: PickerDocument) -> Result<Option<PickerResult>> {
     app.run(&mut terminal.terminal)
 }
 
+type TerminalWriter = Box<dyn Write>;
+type PickerTerminal = Terminal<CrosstermBackend<TerminalWriter>>;
+
 struct TerminalSession {
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: PickerTerminal,
 }
 
 impl TerminalSession {
     fn new() -> Result<Self> {
         enable_raw_mode().context("enable terminal raw mode")?;
-        let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        let mut writer = terminal_writer();
+        if let Err(error) = execute!(writer, EnterAlternateScreen) {
             let _ = disable_raw_mode();
             return Err(error).context("enter alternate screen");
         }
 
-        let backend = CrosstermBackend::new(stdout);
+        let backend = CrosstermBackend::new(writer);
         match Terminal::new(backend) {
-            Ok(mut terminal) => {
-                terminal.clear().context("clear terminal")?;
-                Ok(Self { terminal })
-            }
+            Ok(mut terminal) => match terminal.clear() {
+                Ok(()) => Ok(Self { terminal }),
+                Err(error) => {
+                    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+                    let _ = disable_raw_mode();
+                    Err(error).context("clear terminal")
+                }
+            },
             Err(error) => {
-                let mut stdout = io::stdout();
-                let _ = execute!(stdout, LeaveAlternateScreen);
+                let mut writer = terminal_writer();
+                let _ = execute!(writer, LeaveAlternateScreen);
                 let _ = disable_raw_mode();
                 Err(error).context("initialize terminal")
             }
         }
     }
+}
+
+fn terminal_writer() -> TerminalWriter {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map(|tty| Box::new(tty) as TerminalWriter)
+        .unwrap_or_else(|_| Box::new(io::stderr()))
 }
 
 impl Drop for TerminalSession {
@@ -93,10 +113,7 @@ impl PickerApp {
         }
     }
 
-    fn run(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> Result<Option<PickerResult>> {
+    fn run(&mut self, terminal: &mut PickerTerminal) -> Result<Option<PickerResult>> {
         loop {
             self.engine.tick(2);
             terminal
@@ -199,7 +216,6 @@ impl PickerApp {
                 self.truncate_query_at_cursor();
                 None
             }
-            (KeyCode::Char('u'), modifiers) if modifiers == KeyModifiers::CONTROL => None,
             (KeyCode::Char(character), modifiers)
                 if !modifiers.intersects(
                     KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
