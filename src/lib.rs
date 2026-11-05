@@ -6,8 +6,10 @@
 
 pub mod engine;
 pub mod protocol;
+pub mod ui;
 
 pub use engine::PickerEngine;
 pub use protocol::{
     PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, PickerSelection,
 };
+pub use ui::run_picker;
