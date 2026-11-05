@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::{
     fs,
     io::{self, Read, Write},

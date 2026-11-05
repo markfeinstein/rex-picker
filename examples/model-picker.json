@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "options": {
+    "title": "Pi Model Picker",
+    "prompt": "› ",
+    "placeholder": "Filter models",
+    "footer": "current model is listed first",
+    "initial_query": "",
+    "multi": false,
+    "max_visible": 10,
+    "actions": [
+      {
+        "id": "refresh",
+        "key": "ctrl-r",
+        "label": "refresh"
+      }
+    ]
+  },
+  "items": [
+    {
+      "id": "github-copilot/gpt-5.6-sol:high",
+      "label": "Sol 5.6",
+      "description": "github-copilot · high",
+      "search_text": "github-copilot/gpt-5.6-sol high current",
+      "preview": "Provider: github-copilot\nModel: gpt-5.6-sol\nThinking: high",
+      "metadata": {
+        "provider": "github-copilot",
+        "modelId": "gpt-5.6-sol",
+        "thinkingLevel": "high"
+      }
+    },
+    {
+      "id": "anthropic/claude-opus-4-6:high",
+      "label": "Claude Opus 4.6",
+      "description": "anthropic · high",
+      "search_text": "anthropic/claude-opus-4-6 high",
+      "preview": "Provider: anthropic\nModel: claude-opus-4-6\nThinking: high",
+      "metadata": {
+        "provider": "anthropic",
+        "modelId": "claude-opus-4-6",
+        "thinkingLevel": "high"
+      }
+    },
+    {
+      "id": "google/gemini-3-flash:medium",
+      "label": "Gemini 3 Flash",
+      "description": "google · medium",
+      "search_text": "google/gemini-3-flash medium",
+      "preview": "Provider: google\nModel: gemini-3-flash\nThinking: medium",
+      "metadata": {
+        "provider": "google",
+        "modelId": "gemini-3-flash",
+        "thinkingLevel": "medium"
+      }
+    }
+  ]
+}

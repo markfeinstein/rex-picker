@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Reusable picker primitives for Rex terminal workflows.
 //!
 //! The crate separates fuzzy matching and selection state from terminal I/O and
