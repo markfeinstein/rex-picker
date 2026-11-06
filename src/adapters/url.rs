@@ -90,32 +90,22 @@ impl RexUrlSource {
         };
         let total = usize::try_from(total).context("Rex terminal blob is too large")?;
 
-        let mut window_bytes = total.min(INITIAL_TAIL_BYTES);
-        loop {
-            let start = total.saturating_sub(window_bytes);
-            let suffix = self.read_blob_suffix(blob_id, start, total)?;
-            if start == 0 || suffix.bytes().filter(|byte| *byte == b'\n').count() >= self.line_limit
-            {
-                return Ok(last_lines(&suffix, self.line_limit));
-            }
-            let next_window = total.min(window_bytes.saturating_mul(2));
-            if next_window == window_bytes {
-                return Ok(last_lines(&suffix, self.line_limit));
-            }
-            window_bytes = next_window;
-        }
+        let suffix = read_tail(total, INITIAL_TAIL_BYTES, self.line_limit, |start, end| {
+            self.read_blob_range(blob_id, start, end)
+        })?;
+        Ok(last_lines(&suffix, self.line_limit))
     }
 
-    fn read_blob_suffix(&self, blob_id: u64, start: usize, total: usize) -> Result<String> {
+    fn read_blob_range(&self, blob_id: u64, start: usize, end: usize) -> Result<String> {
         let mut offset = start;
-        let mut output = String::new();
-        while offset < total {
+        let mut output = String::with_capacity(end.saturating_sub(start));
+        while offset < end {
             let response = self.rex_api_call(
                 "com.superlogical.terminal.blob_read",
                 json!({
                     "id": blob_id,
                     "offset": offset,
-                    "max_bytes": BLOB_CHUNK_BYTES,
+                    "max_bytes": BLOB_CHUNK_BYTES.min(end - offset),
                 }),
             )?;
             let data = response
@@ -133,6 +123,15 @@ impl RexUrlSource {
             if response.get("eof").and_then(Value::as_bool) == Some(true) {
                 break;
             }
+        }
+        // A server that ignores `max_bytes` must not duplicate bytes that the
+        // caller already holds from the following range.
+        if offset > end {
+            let mut keep = output.len().saturating_sub(offset - end);
+            while !output.is_char_boundary(keep) {
+                keep -= 1;
+            }
+            output.truncate(keep);
         }
         Ok(output)
     }
@@ -494,6 +493,34 @@ fn display_url(candidate: &UrlCandidate) -> String {
     }
 }
 
+/// Reads the end of a `total`-byte blob until it holds `line_limit` lines.
+///
+/// The window doubles geometrically, but each step fetches only the newly
+/// exposed prefix instead of re-reading bytes already held.
+fn read_tail(
+    total: usize,
+    initial_bytes: usize,
+    line_limit: usize,
+    mut read_range: impl FnMut(usize, usize) -> Result<String>,
+) -> Result<String> {
+    let mut start = total.saturating_sub(initial_bytes);
+    let mut suffix = read_range(start, total)?;
+    let mut newlines = count_newlines(&suffix);
+    while start > 0 && newlines < line_limit {
+        let window = (total - start).max(1);
+        let next_start = total.saturating_sub(window.saturating_mul(2));
+        let prefix = read_range(next_start, start)?;
+        newlines += count_newlines(&prefix);
+        suffix.insert_str(0, &prefix);
+        start = next_start;
+    }
+    Ok(suffix)
+}
+
+fn count_newlines(value: &str) -> usize {
+    value.bytes().filter(|byte| *byte == b'\n').count()
+}
+
 fn last_lines(value: &str, limit: usize) -> String {
     let mut lines: Vec<&str> = value.lines().rev().take(limit).collect();
     lines.reverse();
@@ -547,6 +574,21 @@ mod tests {
             }),
             "Documentation  ·  docs.example.com/guide"
         );
+    }
+
+    #[test]
+    fn tail_reads_fetch_each_byte_once() {
+        let blob: String = (0..100).map(|index| format!("{index:02}\n")).collect();
+        let mut calls = Vec::new();
+        let tail = read_tail(blob.len(), 30, 40, |start, end| {
+            calls.push((start, end));
+            Ok(blob[start..end].to_owned())
+        })
+        .expect("tail");
+
+        assert_eq!(calls, [(270, 300), (240, 270), (180, 240)]);
+        assert_eq!(tail, blob[180..]);
+        assert_eq!(last_lines(&tail, 40), last_lines(&blob, 40));
     }
 
     #[test]
