@@ -144,6 +144,24 @@ command = {
 shell = "none",
 ```
 
+## Password adapter
+
+Choose an entry name from a pass-compatible password store and copy it without exposing the secret to the picker:
+
+```sh
+rex-picker password --origin-block "$REX_BLOCK"
+```
+
+The store defaults to `PASSWORD_STORE_DIR`, then `~/.password-store`. Only relative `.gpg` entry names are indexed; encrypted contents are never opened, decrypted, logged, placed in metadata, or rendered. Symlinks and non-UTF-8 entry paths are skipped.
+
+After selection, the adapter executes:
+
+```sh
+pass show --clip ENTRY
+```
+
+The child process's standard output and error are suppressed so a misbehaving pass-compatible implementation cannot render secret material in the floating terminal. Use `--pass-bin` or `--store` for alternate implementations and locations.
+
 ## JSON protocol
 
 ```sh
@@ -258,9 +276,8 @@ The benchmark covers construction, indexing, and matching at 100, 1,000, and 5,0
 
 ## Planned adapters
 
-1. Password-store entry names with `pass --clip` kept outside the renderer
-2. File discovery, multi-select, and dynamic preview
-3. Nushell history scopes and edit/insert/run actions
+1. File discovery, multi-select, and dynamic preview
+2. Nushell history scopes and edit/insert/run actions
 
 The file adapter is intentionally later: hidden/ignored toggles, streaming discovery, preview cancellation, multi-selection, and shell-safe result injection need explicit designs rather than a premature generic command DSL.
 

@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
 use rex_picker::adapters::{
+    password::{PasswordActionHandler, PasswordStoreSource},
     pi_model::{PiModelAdapter, PiModelClient, PiModelScope},
     url::{RexUrlSource, UrlActionHandler, loading_url_document},
 };
@@ -36,6 +37,9 @@ enum Command {
     Json(JsonArgs),
     /// Pick from newline- or NUL-delimited input.
     Lines(LinesArgs),
+    /// Copy an entry from a pass-compatible password store.
+    #[cfg(unix)]
+    Password(PasswordArgs),
     /// Select a model through a Pi session's Rex model-picker bridge.
     #[cfg(unix)]
     PiModel(PiModelArgs),
@@ -102,6 +106,26 @@ struct LinesArgs {
     /// Pretty-print the result JSON.
     #[arg(long)]
     pretty: bool,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Args)]
+struct PasswordArgs {
+    /// Password-store root. Defaults to PASSWORD_STORE_DIR or ~/.password-store.
+    #[arg(long)]
+    store: Option<PathBuf>,
+    /// pass-compatible executable used to copy the selected entry.
+    #[arg(long, default_value = "pass")]
+    pass_bin: PathBuf,
+    /// Rex block that should regain focus after the picker exits.
+    #[arg(long)]
+    origin_block: Option<String>,
+    /// Do not ask Rex to restore focus on exit.
+    #[arg(long)]
+    no_restore_focus: bool,
+    /// Rex CLI used for focus restoration.
+    #[arg(long, default_value = "rex")]
+    rex_bin: PathBuf,
 }
 
 #[cfg(unix)]
@@ -195,6 +219,8 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         #[cfg(unix)]
+        Command::Password(args) => run_password_picker(args)?,
+        #[cfg(unix)]
         Command::PiModel(args) => run_pi_model(args)?,
         #[cfg(unix)]
         Command::Url(args) => run_url_picker(args)?,
@@ -203,6 +229,27 @@ fn run(cli: Cli) -> Result<()> {
             document.validate().map_err(anyhow::Error::msg)?;
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_password_picker(args: PasswordArgs) -> Result<()> {
+    let store = args
+        .store
+        .or_else(|| std::env::var_os("PASSWORD_STORE_DIR").map(PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".password-store"))
+        })
+        .context("password store is not configured and HOME is unavailable")?;
+    let _focus_guard = RexFocusGuard::new(
+        resolved_rex_bin(&args.rex_bin),
+        std::env::var("REX_SESSION").ok(),
+        args.origin_block,
+        args.no_restore_focus,
+    );
+    let document = PasswordStoreSource::new(store).load_document()?;
+    let handler = PasswordActionHandler::new(args.pass_bin);
+    run_picker_with_handler(document, |result| handler.handle_result(result))?;
     Ok(())
 }
 
@@ -216,7 +263,7 @@ fn run_pi_model(args: PiModelArgs) -> Result<()> {
     let _focus_guard = RexFocusGuard::new(
         rex_bin,
         std::env::var("REX_SESSION").ok(),
-        args.block.clone(),
+        Some(args.block.clone()),
         args.no_restore_focus,
     );
     let client = match args.socket {
@@ -239,7 +286,7 @@ fn run_url_picker(args: UrlArgs) -> Result<()> {
     let _focus_guard = RexFocusGuard::new(
         rex_bin.clone(),
         Some(args.session.clone()),
-        args.block.clone(),
+        Some(args.block.clone()),
         args.no_restore_focus,
     );
     let source = RexUrlSource::new(rex_bin, args.session, args.block);
@@ -291,7 +338,7 @@ impl RexFocusGuard {
     fn new(
         rex_bin: PathBuf,
         session: Option<String>,
-        block: String,
+        block: Option<String>,
         disabled: bool,
     ) -> Option<Self> {
         if disabled {
@@ -300,7 +347,7 @@ impl RexFocusGuard {
         Some(Self {
             rex_bin,
             session: session?,
-            block,
+            block: block?,
         })
     }
 }
