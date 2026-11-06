@@ -4,7 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -18,6 +18,9 @@ const CYCLE_SCOPE_ACTION: &str = "cycle-scope";
 const INSERT_TAB_ACTION: &str = "insert-tab";
 const INSERT_YANK_ACTION: &str = "insert-yank";
 const EDIT_ACTION: &str = "edit";
+/// Nushell may hold a write lock while recording a command; wait briefly
+/// rather than failing the picker with `SQLITE_BUSY`.
+const BUSY_TIMEOUT: Duration = Duration::from_millis(750);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HistoryScope {
@@ -55,6 +58,7 @@ impl HistoryScope {
 #[derive(Clone, Debug)]
 struct HistoryRecord {
     id: i64,
+    /// Whitespace-normalized command used for display and deduplication.
     command: String,
     exit_status: i64,
     duration_ms: Option<i64>,
@@ -100,6 +104,9 @@ impl HistoryAdapter {
         let database = database.into();
         let connection = Connection::open(&database)
             .with_context(|| format!("open Nushell history database {}", database.display()))?;
+        connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .context("configure Nushell history busy timeout")?;
         connection
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_history_session_id ON history(session_id, id DESC);\n\
@@ -209,8 +216,11 @@ impl HistoryAdapter {
         };
 
         let (limit, _) = scope.limits();
+        for record in &mut records {
+            record.command = display_command(&record.command);
+        }
         let mut seen = HashSet::with_capacity(records.len());
-        records.retain(|record| seen.insert(display_command(&record.command)));
+        records.retain(|record| seen.insert(record.command.clone()));
         records.truncate(limit);
         Ok(records)
     }
@@ -220,10 +230,9 @@ impl HistoryAdapter {
         let items = records
             .into_iter()
             .map(|record| {
-                let command = display_command(&record.command);
                 PickerItem {
                     id: record.id.to_string(),
-                    label: command.clone(),
+                    label: record.command,
                     description: Some(format!(
                         "{}  {}  {}",
                         if record.exit_status == 0 {
@@ -234,7 +243,9 @@ impl HistoryAdapter {
                         format_duration(record.duration_ms),
                         format_age(now_ms, record.start_timestamp),
                     )),
-                    search_text: Some(command),
+                    // The label is already indexed; repeating it as search
+                    // text doubled matcher work for every history row.
+                    search_text: None,
                     preview: None,
                     metadata: json!({ "historyId": record.id }),
                 }
