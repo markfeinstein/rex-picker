@@ -638,8 +638,9 @@ impl PickerApp {
                 .borders(Borders::LEFT)
                 .border_style(Style::default().fg(MUTED))
                 .padding(Padding::horizontal(1));
+            let visible = visible_preview(preview, block.inner(areas[1]).height);
             frame.render_widget(
-                Paragraph::new(preview)
+                Paragraph::new(visible)
                     .style(Style::default().fg(SUBTLE))
                     .wrap(Wrap { trim: false })
                     .block(block),
@@ -754,6 +755,22 @@ impl PickerApp {
             .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(MUTED))))
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+/// Returns the prefix of `preview` that can appear in `height` rows.
+///
+/// Each source line occupies at least one wrapped row, so lines past
+/// `height` are never visible. Trimming them first keeps a 1,000-line preview
+/// from being converted and wrapped in full on every frame.
+fn visible_preview(preview: &str, height: u16) -> &str {
+    let height = usize::from(height);
+    if height == 0 {
+        return "";
+    }
+    match preview.match_indices('\n').nth(height - 1) {
+        Some((index, _)) => &preview[..index],
+        None => preview,
     }
 }
 
@@ -886,6 +903,13 @@ mod tests {
             canonical_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT)),
             Some("alt-o".to_owned())
         );
+    }
+
+    #[test]
+    fn preview_keeps_only_lines_that_fit() {
+        assert_eq!(visible_preview("a\nb\nc\n", 2), "a\nb");
+        assert_eq!(visible_preview("a\nb", 5), "a\nb");
+        assert_eq!(visible_preview("a\nb", 0), "");
     }
 
     #[test]
