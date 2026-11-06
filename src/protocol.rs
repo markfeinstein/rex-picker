@@ -68,7 +68,11 @@ impl PickerDocument {
             if !action_ids.insert(action.id.as_str()) {
                 return Err(format!("duplicate action ID {:?}", action.id));
             }
-            if !action_keys.insert(action.key.as_str()) {
+            if action.key.is_empty() {
+                return Err(format!("action {:?} has an empty key", action.id));
+            }
+            // Key lookup is case-insensitive, so `Ctrl-Y` and `ctrl-y` collide.
+            if !action_keys.insert(action.key.to_ascii_lowercase()) {
                 return Err(format!("duplicate action key {:?}", action.key));
             }
         }
@@ -210,5 +214,36 @@ impl From<&PickerItem> for PickerSelection {
             label: item.label.clone(),
             metadata: item.metadata.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn document(keys: &[&str]) -> PickerDocument {
+        PickerDocument {
+            version: 1,
+            options: PickerOptions {
+                actions: keys
+                    .iter()
+                    .enumerate()
+                    .map(|(index, key)| PickerAction {
+                        id: format!("action-{index}"),
+                        key: (*key).to_owned(),
+                        label: "label".to_owned(),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            items: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn action_keys_must_be_nonempty_and_case_insensitively_unique() {
+        assert!(document(&["ctrl-y", "ctrl-b"]).validate().is_ok());
+        assert!(document(&[""]).validate().is_err());
+        assert!(document(&["ctrl-y", "CTRL-Y"]).validate().is_err());
     }
 }
