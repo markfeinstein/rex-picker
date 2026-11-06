@@ -496,7 +496,8 @@ impl PickerApp {
         let area = frame.area();
         let title_height = usize::from(self.options.title.is_some()) as u16;
         let header_height = usize::from(self.options.header.is_some()) as u16;
-        let footer_height = 1;
+        let footer_lines = self.footer_lines(area.width as usize);
+        let footer_height = footer_lines.len() as u16;
         let layout = Layout::vertical([
             Constraint::Length(title_height),
             Constraint::Length(3),
@@ -525,7 +526,7 @@ impl PickerApp {
             );
         }
         self.render_content(frame, layout[3]);
-        self.render_footer(frame, layout[4]);
+        self.render_footer(frame, layout[4], &footer_lines);
     }
 
     fn render_query(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -662,7 +663,7 @@ impl PickerApp {
         frame.render_widget(List::new(rows), area);
     }
 
-    fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
+    fn footer_parts(&self) -> Vec<String> {
         let mut parts = Vec::new();
         if let Some(footer) = &self.options.footer {
             parts.push(footer.clone());
@@ -678,7 +679,13 @@ impl PickerApp {
         );
         parts.push("enter accept".to_owned());
         parts.push("esc cancel".to_owned());
+        parts
+    }
 
+    fn footer_lines(&self, width: usize) -> Vec<String> {
+        if width == 0 {
+            return vec![String::new()];
+        }
         let count = format!(
             "{}/{}",
             self.engine
@@ -687,20 +694,55 @@ impl PickerApp {
                 .min(self.engine.match_count()),
             self.engine.match_count()
         );
-        let available = area.width.saturating_sub(count.width() as u16 + 1) as usize;
-        let hints = truncate_to_width(&parts.join(" · "), available);
-        let gap = area
-            .width
-            .saturating_sub((hints.width() + count.width()) as u16) as usize;
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(hints, Style::default().fg(MUTED)),
-                Span::raw(" ".repeat(gap)),
-                Span::styled(count, Style::default().fg(MUTED)),
-            ])),
-            area,
-        );
+        let count = truncate_to_width(&count, width);
+        let first_capacity = width.saturating_sub(count.width() + 1);
+        let mut lines = pack_footer_parts(&self.footer_parts(), first_capacity, width);
+        let first = lines.first_mut().expect("footer always has a first line");
+        let gap = width.saturating_sub(first.width() + count.width());
+        first.push_str(&" ".repeat(gap));
+        first.push_str(&count);
+        lines
     }
+
+    fn render_footer(&self, frame: &mut Frame<'_>, area: Rect, lines: &[String]) {
+        let lines = lines
+            .iter()
+            .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(MUTED))))
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+fn pack_footer_parts(parts: &[String], first_width: usize, full_width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut capacity = first_width;
+    if capacity == 0 {
+        lines.push(String::new());
+        capacity = full_width;
+    }
+
+    for part in parts {
+        let separator = if current.is_empty() { "" } else { " · " };
+        let candidate_width = current.width() + separator.width() + part.width();
+        if !current.is_empty() && candidate_width > capacity {
+            lines.push(current);
+            current = String::new();
+            capacity = full_width;
+        }
+        if !current.is_empty() {
+            current.push_str(" · ");
+        }
+        current.push_str(&truncate_to_width(
+            part,
+            capacity.saturating_sub(current.width()),
+        ));
+    }
+
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn char_to_byte_index(value: &str, char_index: usize) -> usize {
@@ -805,5 +847,61 @@ mod tests {
     fn truncation_respects_visible_width() {
         assert_eq!(truncate_to_width("abcdef", 4), "abc…");
         assert_eq!(truncate_to_width("界界界", 5), "界界…");
+    }
+
+    #[test]
+    fn footer_wraps_without_dropping_file_picker_hints() {
+        let mut options = crate::PickerOptions {
+            footer: Some("hidden off   ignored on".to_owned()),
+            multi: true,
+            ..Default::default()
+        };
+        options.actions = [
+            ("toggle-hidden", "alt-.", "hidden"),
+            ("toggle-ignored", "alt-i", "ignored"),
+            ("toggle-preview", "alt-v", "preview"),
+            ("copy-paths", "alt-y", "copy paths"),
+            ("reveal", "alt-o", "reveal"),
+        ]
+        .into_iter()
+        .map(|(id, key, label)| crate::PickerAction {
+            id: id.to_owned(),
+            key: key.to_owned(),
+            label: label.to_owned(),
+        })
+        .collect();
+        let mut engine = PickerEngine::new(
+            vec![PickerItem {
+                id: "file".to_owned(),
+                label: "file.txt".to_owned(),
+                description: None,
+                search_text: None,
+                preview: None,
+                metadata: serde_json::Value::Null,
+            }],
+            true,
+        );
+        engine.settle();
+        let app = PickerApp::new(engine, options, None);
+
+        let lines = app.footer_lines(80);
+        assert!(lines.len() >= 2);
+        assert!(lines.iter().all(|line| line.width() <= 80));
+        assert!(lines[0].ends_with("1/1"));
+        let rendered = lines.join(" ");
+        for hint in [
+            "hidden off",
+            "ignored on",
+            "tab select",
+            "alt-. hidden",
+            "alt-i ignored",
+            "alt-v preview",
+            "alt-y copy paths",
+            "alt-o reveal",
+            "enter accept",
+            "esc cancel",
+        ] {
+            assert!(rendered.contains(hint), "missing footer hint {hint:?}");
+        }
     }
 }
