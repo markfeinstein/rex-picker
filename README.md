@@ -29,6 +29,16 @@ cargo build --release
 
 The optimized binary is written to `target/release/rex-picker`.
 
+A pinned Nix build is also available:
+
+```sh
+nix build
+nix run . -- --help
+nix develop
+```
+
+The flake package runs the complete test and Clippy suite during `nix flake check`.
+
 ## Quick start
 
 Pick from shell-generated lines:
