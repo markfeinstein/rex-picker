@@ -191,6 +191,7 @@ impl FilePickerAdapter {
                 self.preview_visible = !self.preview_visible;
                 Ok(Some(self.document()))
             }
+            COPY_ACTION | REVEAL_ACTION if result.selected.is_empty() => Ok(None),
             COPY_ACTION => {
                 let paths = self.selected_paths(result)?;
                 copy_paths(&self.clipboard_bin, &paths)?;

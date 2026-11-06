@@ -198,10 +198,10 @@ impl UrlActionHandler {
     }
 
     pub fn handle_result(&self, result: &PickerResult) -> Result<Option<PickerDocument>> {
-        let selected = result
-            .selected
-            .first()
-            .context("URL picker accepted without a selection")?;
+        // Row actions on an empty list are no-ops; the picker stays open.
+        let Some(selected) = result.selected.first() else {
+            return Ok(None);
+        };
         let url = selected
             .metadata
             .get("url")

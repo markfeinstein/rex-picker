@@ -141,6 +141,8 @@ impl HistoryAdapter {
     pub fn handle_result(&mut self, result: &PickerResult) -> Result<Option<PickerDocument>> {
         match result.action.as_str() {
             CYCLE_SCOPE_ACTION => self.cycle_scope().map(Some),
+            // Row actions on an empty list are no-ops; the picker stays open.
+            _ if result.selected.is_empty() => Ok(None),
             "accept" => {
                 self.finish(result, "run", false)?;
                 Ok(None)

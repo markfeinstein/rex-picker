@@ -50,6 +50,11 @@ pub fn run_picker(document: PickerDocument) -> Result<Option<PickerResult>> {
 ///
 /// Returning a replacement document keeps the picker open, preserves the query,
 /// and atomically swaps the candidate set. Returning `None` accepts the result.
+///
+/// Alternate actions are delivered even when no row is highlighted, so
+/// row-independent actions such as refreshes keep working on an empty list.
+/// Such results have an empty `selected` list; returning `None` for them
+/// leaves the picker open instead of producing an empty final result.
 pub fn run_picker_with_handler<F>(
     document: PickerDocument,
     handler: F,
@@ -99,10 +104,11 @@ where
         let Some(result) = app.run(&mut terminal.terminal, &mut updates)? else {
             return Ok(None);
         };
-        let Some(replacement) = handler(&result)? else {
-            return Ok(Some(result));
-        };
-        app.replace_document(replacement)?;
+        match handler(&result)? {
+            Some(replacement) => app.replace_document(replacement)?,
+            None if result.selected.is_empty() => {}
+            None => return Ok(Some(result)),
+        }
     }
 }
 
@@ -376,11 +382,13 @@ impl PickerApp {
         }
 
         if let Some(action) = self.action_for_key(key) {
-            return Some(self.engine.result(action));
+            return Some(Some(self.engine.action_result(action)));
         }
 
         match (key.code, key.modifiers) {
-            (KeyCode::Enter, _) => Some(self.engine.result("accept")),
+            // Enter with no matching row keeps the picker open rather than
+            // silently exiting as though the user had cancelled.
+            (KeyCode::Enter, _) => self.engine.result("accept").map(Some),
             (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
                 self.engine.move_previous();
                 None
@@ -940,5 +948,32 @@ mod tests {
         ] {
             assert!(rendered.contains(hint), "missing footer hint {hint:?}");
         }
+    }
+
+    #[test]
+    fn empty_list_keeps_actions_available_and_ignores_enter() {
+        let options = crate::PickerOptions {
+            actions: vec![crate::PickerAction {
+                id: "refresh".to_owned(),
+                key: "ctrl-r".to_owned(),
+                label: "refresh".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let mut engine = PickerEngine::new(Vec::new(), false);
+        engine.settle();
+        let mut app = PickerApp::new(engine, options, None);
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            None,
+            "Enter on an empty list must not exit the picker"
+        );
+        let outcome = app
+            .handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .expect("action exits the input loop")
+            .expect("action is not a cancellation");
+        assert_eq!(outcome.action, "refresh");
+        assert!(outcome.selected.is_empty());
     }
 }

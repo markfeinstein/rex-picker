@@ -214,7 +214,18 @@ impl PickerEngine {
     }
 
     /// Builds a result for the current or explicitly toggled selections.
+    ///
+    /// Returns `None` when nothing is highlighted or selected.
     pub fn result(&self, action: impl Into<String>) -> Option<PickerResult> {
+        let result = self.action_result(action);
+        (!result.selected.is_empty()).then_some(result)
+    }
+
+    /// Builds a result even when nothing is selected.
+    ///
+    /// Alternate actions such as scope toggles or refreshes do not depend on a
+    /// row and must remain available while the candidate list is empty.
+    pub fn action_result(&self, action: impl Into<String>) -> PickerResult {
         let selected = if self.multi && !self.selected.is_empty() {
             self.selected
                 .iter()
@@ -222,13 +233,16 @@ impl PickerEngine {
                 .map(PickerSelection::from)
                 .collect()
         } else {
-            vec![PickerSelection::from(self.current_item()?)]
+            self.current_item()
+                .map(PickerSelection::from)
+                .into_iter()
+                .collect()
         };
 
-        Some(PickerResult {
+        PickerResult {
             action: action.into(),
             selected,
-        })
+        }
     }
 
     fn matched_candidate(&self, index: usize) -> Option<&Candidate> {
