@@ -235,9 +235,8 @@ impl PickerApp {
 
     fn replace_document(&mut self, document: PickerDocument) -> Result<()> {
         document.validate().map_err(anyhow::Error::msg)?;
-        let query = self.engine.query().to_owned();
-        self.engine = PickerEngine::new(document.items, document.options.multi);
-        self.engine.set_query(query);
+        self.engine
+            .replace_items(document.items, document.options.multi);
         self.options = document.options;
         self.query_cursor = self.engine.query().chars().count();
         self.preview_item_id = None;
@@ -630,7 +629,7 @@ impl PickerApp {
                 Span::raw("  ")
             };
             let selection = if self.options.multi {
-                if self.engine.is_selected(&item.id) {
+                if self.engine.is_matched_selected(index) {
                     Span::styled("✓ ", Style::default().fg(SUCCESS))
                 } else {
                     Span::raw("  ")
