@@ -1,6 +1,6 @@
 use std::{
     fs::OpenOptions,
-    io::{self, Write},
+    io::{self, BufWriter, Write},
     sync::{Arc, mpsc},
     thread,
     time::Duration,
@@ -25,6 +25,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::{PickerDocument, PickerEngine, PickerItem, PickerResult};
 
 const EVENT_INTERVAL: Duration = Duration::from_millis(16);
+/// Large enough to hold a full-screen frame so each draw is one write.
+const TERMINAL_BUFFER_BYTES: usize = 64 * 1024;
 const ACCENT: Color = Color::Rgb(196, 167, 231);
 const MUTED: Color = Color::Rgb(110, 106, 134);
 const SUBTLE: Color = Color::Rgb(144, 140, 170);
@@ -141,12 +143,20 @@ impl TerminalSession {
 }
 
 fn terminal_writer() -> TerminalWriter {
+    // Crossterm emits many small escape sequences per frame; buffering turns
+    // them into a single write instead of one syscall per cell run. Ratatui
+    // flushes the backend after every draw, and `execute!` flushes as well.
     OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
-        .map(|tty| Box::new(tty) as TerminalWriter)
-        .unwrap_or_else(|_| Box::new(io::stderr()))
+        .map(|tty| Box::new(BufWriter::with_capacity(TERMINAL_BUFFER_BYTES, tty)) as TerminalWriter)
+        .unwrap_or_else(|_| {
+            Box::new(BufWriter::with_capacity(
+                TERMINAL_BUFFER_BYTES,
+                io::stderr(),
+            ))
+        })
 }
 
 impl Drop for TerminalSession {
@@ -253,54 +263,76 @@ impl PickerApp {
     where
         U: FnMut() -> Result<Option<PickerDocument>>,
     {
+        let mut dirty = true;
         loop {
             if let Some(document) = updates()? {
                 self.replace_document(document)?;
+                dirty = true;
             }
-            self.engine.tick(2);
-            self.poll_preview();
-            self.request_preview();
-            terminal
-                .draw(|frame| self.render(frame))
-                .context("render picker")?;
+            dirty |= self.engine.tick(2).changed;
+            dirty |= self.poll_preview();
+            dirty |= self.request_preview();
+            // Idle frames are skipped entirely: no layout, no buffer diff, and
+            // no terminal I/O unless something visible may have changed.
+            if dirty {
+                terminal
+                    .draw(|frame| self.render(frame))
+                    .context("render picker")?;
+                dirty = false;
+            }
 
             if !event::poll(EVENT_INTERVAL).context("poll terminal input")? {
                 continue;
             }
 
-            match event::read().context("read terminal input")? {
-                Event::Key(key)
-                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
-                {
-                    if let Some(outcome) = self.handle_key(key) {
-                        return Ok(outcome);
+            // Drain every queued event before rendering again so bursts such
+            // as key repeat or fast typing cost one frame, not one per key.
+            loop {
+                match event::read().context("read terminal input")? {
+                    Event::Key(key)
+                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                    {
+                        if let Some(outcome) = self.handle_key(key) {
+                            return Ok(outcome);
+                        }
+                        dirty = true;
                     }
+                    Event::Paste(text) => {
+                        self.insert_text(&text);
+                        dirty = true;
+                    }
+                    Event::Resize(_, _) => dirty = true,
+                    _ => {}
                 }
-                Event::Paste(text) => self.insert_text(&text),
-                Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => {}
-                _ => {}
+                if !event::poll(Duration::ZERO).context("poll terminal input")? {
+                    break;
+                }
             }
         }
     }
 
-    fn request_preview(&mut self) {
+    /// Requests a preview for the highlighted item. Returns whether preview
+    /// state changed and needs to be redrawn.
+    fn request_preview(&mut self) -> bool {
         let Some(worker) = &self.preview_worker else {
-            return;
+            return false;
         };
-        if !self.options.preview_visible {
+        let item = if self.options.preview_visible {
+            self.engine.current_item()
+        } else {
+            None
+        };
+        let Some(item) = item else {
+            let changed = self.preview_item_id.is_some()
+                || self.dynamic_preview.is_some()
+                || self.preview_loading;
             self.preview_item_id = None;
             self.dynamic_preview = None;
             self.preview_loading = false;
-            return;
-        }
-        let Some(item) = self.engine.current_item() else {
-            self.preview_item_id = None;
-            self.dynamic_preview = None;
-            self.preview_loading = false;
-            return;
+            return changed;
         };
         if self.preview_item_id.as_deref() == Some(item.id.as_str()) {
-            return;
+            return false;
         }
 
         self.preview_generation = self.preview_generation.wrapping_add(1);
@@ -311,12 +343,15 @@ impl PickerApp {
             generation: self.preview_generation,
             item: item.clone(),
         });
+        true
     }
 
-    fn poll_preview(&mut self) {
+    /// Applies finished preview responses. Returns whether one was applied.
+    fn poll_preview(&mut self) -> bool {
         let Some(worker) = &self.preview_worker else {
-            return;
+            return false;
         };
+        let mut changed = false;
         while let Ok(response) = worker.responses.try_recv() {
             if response.generation != self.preview_generation
                 || self.preview_item_id.as_deref() != Some(response.item_id.as_str())
@@ -328,7 +363,9 @@ impl PickerApp {
                 Ok(preview) => preview,
                 Err(error) => Some(format!("Preview unavailable: {error:#}")),
             };
+            changed = true;
         }
+        changed
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<Option<PickerResult>> {
@@ -552,7 +589,7 @@ impl PickerApp {
         frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 
         let prefix_width = self.options.prompt.width();
-        let cursor_prefix: String = query.chars().take(self.query_cursor).collect();
+        let cursor_prefix = &query[..char_to_byte_index(query, self.query_cursor)];
         let cursor_x = inner
             .x
             .saturating_add((prefix_width + cursor_prefix.width()) as u16)
@@ -762,12 +799,13 @@ fn truncate_to_width(value: &str, width: usize) -> String {
     let ellipsis = "…";
     let target = width.saturating_sub(ellipsis.width());
     let mut output = String::new();
+    let mut used = 0;
     for character in value.chars() {
-        let mut candidate = output.clone();
-        candidate.push(character);
-        if candidate.width() > target {
+        let character_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + character_width > target {
             break;
         }
+        used += character_width;
         output.push(character);
     }
     output.push_str(ellipsis);
