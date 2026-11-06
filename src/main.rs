@@ -24,8 +24,8 @@ use rex_picker::adapters::{
     url::{RexUrlSource, UrlActionHandler, loading_url_document},
 };
 use rex_picker::{
-    PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, run_picker,
-    run_picker_runtime, run_picker_runtime_with_preview, run_picker_with_handler,
+    PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, fs_util::write_atomic,
+    run_picker, run_picker_runtime, run_picker_runtime_with_preview, run_picker_with_handler,
 };
 use serde_json::json;
 
@@ -654,32 +654,6 @@ fn write_result(path: &Path, result: &PickerResult, pretty: bool) -> Result<()> 
     }
 
     write_atomic(path, &encoded)
-}
-
-fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("output path must have a UTF-8 file name")?;
-    let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
-
-    let write_result = (|| -> Result<()> {
-        let mut file = fs::File::create(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        file.write_all(contents)
-            .with_context(|| format!("write {}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("sync {}", temporary.display()))?;
-        fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    write_result
 }
 
 fn parse_action(value: &str) -> Result<PickerAction, String> {

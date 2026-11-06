@@ -8,6 +8,7 @@
 
 pub mod adapters;
 pub mod engine;
+pub mod fs_util;
 pub mod protocol;
 pub mod ui;
 

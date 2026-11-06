@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     fs,
     io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -12,7 +12,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult};
+use crate::{
+    PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, fs_util::write_atomic,
+};
 
 const CYCLE_SCOPE_ACTION: &str = "cycle-scope";
 const INSERT_TAB_ACTION: &str = "insert-tab";
@@ -325,7 +327,8 @@ impl HistoryAdapter {
             action: action.to_owned(),
         };
         if let Some(path) = &self.result_file {
-            write_json_atomic(path, &result)?;
+            let bytes = serde_json::to_vec(&result).context("serialize history result")?;
+            write_atomic(path, &bytes)?;
             self.signal_result_ready()?;
         } else {
             self.last_result = Some(result);
@@ -432,26 +435,6 @@ fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis() as i64)
-}
-
-fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .context("history result path has no UTF-8 file name")?;
-    let temporary = parent.join(format!(".{name}.{}.tmp", std::process::id()));
-    let result = (|| -> Result<()> {
-        let bytes = serde_json::to_vec(value)?;
-        fs::write(&temporary, bytes)?;
-        fs::rename(&temporary, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
 }
 
 #[cfg(test)]
