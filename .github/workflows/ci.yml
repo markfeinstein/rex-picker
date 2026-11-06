@@ -10,14 +10,10 @@ permissions:
 
 jobs:
   rust:
-    name: Rust (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-14]
-    runs-on: ${{ matrix.os }}
+    name: Rust
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.88
         with:
           components: clippy,rustfmt
@@ -31,7 +27,6 @@ jobs:
     name: Nix flake
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@v17
-      - uses: DeterminateSystems/magic-nix-cache-action@v9
       - run: nix flake check --print-build-logs
