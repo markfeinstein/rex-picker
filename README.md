@@ -113,6 +113,37 @@ The adapter accepts both wire formats used by the dotfiles extension:
 
 Protocol 2 capability metadata controls whether scope and refresh actions are shown. ANSI styling is sanitized, while concealed search aliases remain searchable without being rendered.
 
+## URL adapter
+
+Search the newest 20,000 lines of a Rex terminal's scrollback:
+
+```sh
+rex-picker url "$REX_SESSION" "$REX_BLOCK"
+```
+
+The picker renders a loading screen immediately while a worker captures and parses scrollback. It prefers Rex's bounded blob API so large terminals read only the recent suffix, and falls back to `rex capture --format=html` when that API is unavailable.
+
+Controls:
+
+- `Enter`: open the URL
+- `Ctrl+B`: open without bringing the browser forward
+- `Ctrl+Y`: copy the URL
+- `Escape`: cancel
+
+Both visible URLs and OSC 8/HTML hyperlinks are supported. Trailing sentence punctuation and unmatched closing brackets are removed, duplicate destinations are collapsed newest-first, and hyperlink labels remain searchable.
+
+For a Rex floating layer:
+
+```lua
+command = {
+  "/absolute/path/to/rex-picker",
+  "url",
+  ctx.session_id,
+  ctx.block_id,
+},
+shell = "none",
+```
+
 ## JSON protocol
 
 ```sh
@@ -227,10 +258,9 @@ The benchmark covers construction, indexing, and matching at 100, 1,000, and 5,0
 
 ## Planned adapters
 
-1. Rex scrollback URL extraction and URL actions
-2. Password-store entry names with `pass --clip` kept outside the renderer
-3. File discovery, multi-select, and dynamic preview
-4. Nushell history scopes and edit/insert/run actions
+1. Password-store entry names with `pass --clip` kept outside the renderer
+2. File discovery, multi-select, and dynamic preview
+3. Nushell history scopes and edit/insert/run actions
 
 The file adapter is intentionally later: hidden/ignored toggles, streaming discovery, preview cancellation, multi-selection, and shell-safe result injection need explicit designs rather than a premature generic command DSL.
 

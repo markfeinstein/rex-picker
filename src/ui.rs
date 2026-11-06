@@ -43,10 +43,27 @@ pub fn run_picker(document: PickerDocument) -> Result<Option<PickerResult>> {
 /// and atomically swaps the candidate set. Returning `None` accepts the result.
 pub fn run_picker_with_handler<F>(
     document: PickerDocument,
-    mut handler: F,
+    handler: F,
 ) -> Result<Option<PickerResult>>
 where
     F: FnMut(&PickerResult) -> Result<Option<PickerDocument>>,
+{
+    run_picker_runtime(document, handler, || Ok(None))
+}
+
+/// Runs a picker with both accepted-action handling and asynchronous document updates.
+///
+/// The update callback is polled between frames. This lets adapters show the
+/// terminal immediately, discover candidates on a worker thread, and replace
+/// the loading document without blocking keyboard input or rendering.
+pub fn run_picker_runtime<F, U>(
+    document: PickerDocument,
+    mut handler: F,
+    mut updates: U,
+) -> Result<Option<PickerResult>>
+where
+    F: FnMut(&PickerResult) -> Result<Option<PickerDocument>>,
+    U: FnMut() -> Result<Option<PickerDocument>>,
 {
     document.validate().map_err(anyhow::Error::msg)?;
 
@@ -56,7 +73,7 @@ where
     let mut terminal = TerminalSession::new()?;
     let mut app = PickerApp::new(engine, document.options);
     loop {
-        let Some(result) = app.run(&mut terminal.terminal)? else {
+        let Some(result) = app.run(&mut terminal.terminal, &mut updates)? else {
             return Ok(None);
         };
         let Some(replacement) = handler(&result)? else {
@@ -145,8 +162,18 @@ impl PickerApp {
         Ok(())
     }
 
-    fn run(&mut self, terminal: &mut PickerTerminal) -> Result<Option<PickerResult>> {
+    fn run<U>(
+        &mut self,
+        terminal: &mut PickerTerminal,
+        updates: &mut U,
+    ) -> Result<Option<PickerResult>>
+    where
+        U: FnMut() -> Result<Option<PickerDocument>>,
+    {
         loop {
+            if let Some(document) = updates()? {
+                self.replace_document(document)?;
+            }
             self.engine.tick(2);
             terminal
                 .draw(|frame| self.render(frame))

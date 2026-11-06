@@ -5,16 +5,21 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode, Stdio},
+    sync::mpsc::{self, TryRecvError},
+    thread,
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
-use rex_picker::adapters::pi_model::{PiModelAdapter, PiModelClient, PiModelScope};
+use rex_picker::adapters::{
+    pi_model::{PiModelAdapter, PiModelClient, PiModelScope},
+    url::{RexUrlSource, UrlActionHandler, loading_url_document},
+};
 use rex_picker::{
     PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, run_picker,
-    run_picker_with_handler,
+    run_picker_runtime, run_picker_with_handler,
 };
 use serde_json::json;
 
@@ -34,6 +39,9 @@ enum Command {
     /// Select a model through a Pi session's Rex model-picker bridge.
     #[cfg(unix)]
     PiModel(PiModelArgs),
+    /// Pick an HTTP(S) URL from recent Rex terminal scrollback.
+    #[cfg(unix)]
+    Url(UrlArgs),
     /// Validate a JSON picker document without opening the terminal UI.
     Validate(InputArgs),
 }
@@ -141,6 +149,27 @@ struct PiModelArgs {
     rex_bin: PathBuf,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Args)]
+struct UrlArgs {
+    /// Rex session containing the source terminal.
+    session: String,
+    /// Rex terminal block whose scrollback should be searched.
+    block: String,
+    /// Rex CLI used to capture scrollback and restore focus.
+    #[arg(long, default_value = "rex")]
+    rex_bin: PathBuf,
+    /// macOS opener used for accepted URLs.
+    #[arg(long, default_value = "/usr/bin/open")]
+    open_bin: PathBuf,
+    /// Clipboard program that accepts the URL on standard input.
+    #[arg(long, default_value = "/usr/bin/pbcopy")]
+    clipboard_bin: PathBuf,
+    /// Do not ask Rex to restore focus to the source block on exit.
+    #[arg(long)]
+    no_restore_focus: bool,
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -167,6 +196,8 @@ fn run(cli: Cli) -> Result<()> {
         }
         #[cfg(unix)]
         Command::PiModel(args) => run_pi_model(args)?,
+        #[cfg(unix)]
+        Command::Url(args) => run_url_picker(args)?,
         Command::Validate(args) => {
             let document = read_document(&args.input)?;
             document.validate().map_err(anyhow::Error::msg)?;
@@ -181,7 +212,13 @@ fn run_pi_model(args: PiModelArgs) -> Result<()> {
         bail!("Pi model-picker timeouts must be greater than zero");
     }
 
-    let _focus_guard = RexFocusGuard::new(&args);
+    let rex_bin = resolved_rex_bin(&args.rex_bin);
+    let _focus_guard = RexFocusGuard::new(
+        rex_bin,
+        std::env::var("REX_SESSION").ok(),
+        args.block.clone(),
+        args.no_restore_focus,
+    );
     let client = match args.socket {
         Some(path) => PiModelClient::new(path),
         None => PiModelClient::for_block(&args.block)?,
@@ -197,6 +234,52 @@ fn run_pi_model(args: PiModelArgs) -> Result<()> {
 }
 
 #[cfg(unix)]
+fn run_url_picker(args: UrlArgs) -> Result<()> {
+    let rex_bin = resolved_rex_bin(&args.rex_bin);
+    let _focus_guard = RexFocusGuard::new(
+        rex_bin.clone(),
+        Some(args.session.clone()),
+        args.block.clone(),
+        args.no_restore_focus,
+    );
+    let source = RexUrlSource::new(rex_bin, args.session, args.block);
+    let handler = UrlActionHandler::new(args.open_bin, args.clipboard_bin);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let _ = sender.send(source.load_document());
+    });
+    let mut capture_complete = false;
+
+    run_picker_runtime(
+        loading_url_document(),
+        |result| handler.handle_result(result),
+        || {
+            if capture_complete {
+                return Ok(None);
+            }
+            match receiver.try_recv() {
+                Ok(result) => {
+                    capture_complete = true;
+                    result.map(Some)
+                }
+                Err(TryRecvError::Empty) => Ok(None),
+                Err(TryRecvError::Disconnected) => {
+                    bail!("URL capture worker exited without returning a result")
+                }
+            }
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn resolved_rex_bin(default: &Path) -> PathBuf {
+    std::env::var_os("REX_BIN_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default.to_owned())
+}
+
+#[cfg(unix)]
 struct RexFocusGuard {
     rex_bin: PathBuf,
     session: String,
@@ -205,18 +288,19 @@ struct RexFocusGuard {
 
 #[cfg(unix)]
 impl RexFocusGuard {
-    fn new(args: &PiModelArgs) -> Option<Self> {
-        if args.no_restore_focus {
+    fn new(
+        rex_bin: PathBuf,
+        session: Option<String>,
+        block: String,
+        disabled: bool,
+    ) -> Option<Self> {
+        if disabled {
             return None;
         }
-        let session = std::env::var("REX_SESSION").ok()?;
-        let rex_bin = std::env::var_os("REX_BIN_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| args.rex_bin.clone());
         Some(Self {
             rex_bin,
-            session,
-            block: args.block.clone(),
+            session: session?,
+            block,
         })
     }
 }
