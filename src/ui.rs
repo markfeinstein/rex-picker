@@ -34,6 +34,20 @@ const SUCCESS: Color = Color::Rgb(49, 116, 143);
 /// `Ok(None)` means the user cancelled. Terminal state is restored even when
 /// rendering or input handling fails.
 pub fn run_picker(document: PickerDocument) -> Result<Option<PickerResult>> {
+    run_picker_with_handler(document, |_| Ok(None))
+}
+
+/// Runs a picker and lets an adapter handle accepted actions before the UI exits.
+///
+/// Returning a replacement document keeps the picker open, preserves the query,
+/// and atomically swaps the candidate set. Returning `None` accepts the result.
+pub fn run_picker_with_handler<F>(
+    document: PickerDocument,
+    mut handler: F,
+) -> Result<Option<PickerResult>>
+where
+    F: FnMut(&PickerResult) -> Result<Option<PickerDocument>>,
+{
     document.validate().map_err(anyhow::Error::msg)?;
 
     let mut engine = PickerEngine::new(document.items, document.options.multi);
@@ -41,7 +55,15 @@ pub fn run_picker(document: PickerDocument) -> Result<Option<PickerResult>> {
 
     let mut terminal = TerminalSession::new()?;
     let mut app = PickerApp::new(engine, document.options);
-    app.run(&mut terminal.terminal)
+    loop {
+        let Some(result) = app.run(&mut terminal.terminal)? else {
+            return Ok(None);
+        };
+        let Some(replacement) = handler(&result)? else {
+            return Ok(Some(result));
+        };
+        app.replace_document(replacement)?;
+    }
 }
 
 type TerminalWriter = Box<dyn Write>;
@@ -111,6 +133,16 @@ impl PickerApp {
             options,
             query_cursor,
         }
+    }
+
+    fn replace_document(&mut self, document: PickerDocument) -> Result<()> {
+        document.validate().map_err(anyhow::Error::msg)?;
+        let query = self.engine.query().to_owned();
+        self.engine = PickerEngine::new(document.items, document.options.multi);
+        self.engine.set_query(query);
+        self.options = document.options;
+        self.query_cursor = self.engine.query().chars().count();
+        Ok(())
     }
 
     fn run(&mut self, terminal: &mut PickerTerminal) -> Result<Option<PickerResult>> {
@@ -302,10 +334,12 @@ impl PickerApp {
     fn render(&self, frame: &mut Frame<'_>) {
         let area = frame.area();
         let title_height = usize::from(self.options.title.is_some()) as u16;
+        let header_height = usize::from(self.options.header.is_some()) as u16;
         let footer_height = 1;
         let layout = Layout::vertical([
             Constraint::Length(title_height),
             Constraint::Length(3),
+            Constraint::Length(header_height),
             Constraint::Min(1),
             Constraint::Length(footer_height),
         ])
@@ -323,8 +357,14 @@ impl PickerApp {
         }
 
         self.render_query(frame, layout[1]);
-        self.render_content(frame, layout[2]);
-        self.render_footer(frame, layout[3]);
+        if let Some(header) = &self.options.header {
+            frame.render_widget(
+                Paragraph::new(header.as_str()).style(Style::default().fg(MUTED)),
+                layout[2],
+            );
+        }
+        self.render_content(frame, layout[3]);
+        self.render_footer(frame, layout[4]);
     }
 
     fn render_query(&self, frame: &mut Frame<'_>, area: Rect) {

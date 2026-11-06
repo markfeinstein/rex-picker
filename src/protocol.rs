@@ -84,6 +84,9 @@ pub struct PickerOptions {
     /// Dimmed hint rendered while the query is empty.
     #[serde(default = "default_placeholder")]
     pub placeholder: String,
+    /// Optional fixed header rendered above the candidate rows.
+    #[serde(default)]
+    pub header: Option<String>,
     /// Optional footer. Action hints are appended automatically.
     #[serde(default)]
     pub footer: Option<String>,
@@ -107,6 +110,7 @@ impl Default for PickerOptions {
             title: None,
             prompt: default_prompt(),
             placeholder: default_placeholder(),
+            header: None,
             footer: None,
             initial_query: String::new(),
             multi: false,

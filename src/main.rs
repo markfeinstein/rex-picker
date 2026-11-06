@@ -4,13 +4,17 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Command as ProcessCommand, ExitCode, Stdio},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+#[cfg(unix)]
+use rex_picker::adapters::pi_model::{PiModelAdapter, PiModelClient, PiModelScope};
 use rex_picker::{
     PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, run_picker,
+    run_picker_with_handler,
 };
 use serde_json::json;
 
@@ -27,6 +31,9 @@ enum Command {
     Json(JsonArgs),
     /// Pick from newline- or NUL-delimited input.
     Lines(LinesArgs),
+    /// Select a model through a Pi session's Rex model-picker bridge.
+    #[cfg(unix)]
+    PiModel(PiModelArgs),
     /// Validate a JSON picker document without opening the terminal UI.
     Validate(InputArgs),
 }
@@ -89,6 +96,51 @@ struct LinesArgs {
     pretty: bool,
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum PiModelScopeArg {
+    All,
+    Scoped,
+}
+
+#[cfg(unix)]
+impl From<PiModelScopeArg> for PiModelScope {
+    fn from(value: PiModelScopeArg) -> Self {
+        match value {
+            PiModelScopeArg::All => Self::All,
+            PiModelScopeArg::Scoped => Self::Scoped,
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Args)]
+struct PiModelArgs {
+    /// Rex block containing the Pi session.
+    block: String,
+    /// Override the Pi extension's Unix socket path.
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    /// Initial model scope. Pi chooses the configured default when omitted.
+    #[arg(long, value_enum)]
+    scope: Option<PiModelScopeArg>,
+    /// Refresh provider catalogs before displaying the initial list.
+    #[arg(long)]
+    refresh: bool,
+    /// Timeout for ordinary list and selection requests.
+    #[arg(long, default_value_t = 3_000)]
+    timeout_ms: u64,
+    /// Timeout for catalog refresh requests.
+    #[arg(long, default_value_t = 20_000)]
+    refresh_timeout_ms: u64,
+    /// Do not ask Rex to restore focus to the originating Pi block on exit.
+    #[arg(long)]
+    no_restore_focus: bool,
+    /// Rex CLI used for focus restoration.
+    #[arg(long, default_value = "rex")]
+    rex_bin: PathBuf,
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -113,12 +165,74 @@ fn run(cli: Cli) -> Result<()> {
                 write_result(&args.output, &result, args.pretty)?;
             }
         }
+        #[cfg(unix)]
+        Command::PiModel(args) => run_pi_model(args)?,
         Command::Validate(args) => {
             let document = read_document(&args.input)?;
             document.validate().map_err(anyhow::Error::msg)?;
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn run_pi_model(args: PiModelArgs) -> Result<()> {
+    if args.timeout_ms == 0 || args.refresh_timeout_ms == 0 {
+        bail!("Pi model-picker timeouts must be greater than zero");
+    }
+
+    let _focus_guard = RexFocusGuard::new(&args);
+    let client = match args.socket {
+        Some(path) => PiModelClient::new(path),
+        None => PiModelClient::for_block(&args.block)?,
+    }
+    .with_timeouts(
+        Duration::from_millis(args.timeout_ms),
+        Duration::from_millis(args.refresh_timeout_ms),
+    );
+    let mut adapter = PiModelAdapter::new(client, args.scope.map(Into::into));
+    let document = adapter.load(args.refresh)?;
+    run_picker_with_handler(document, |result| adapter.handle_result(result))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+struct RexFocusGuard {
+    rex_bin: PathBuf,
+    session: String,
+    block: String,
+}
+
+#[cfg(unix)]
+impl RexFocusGuard {
+    fn new(args: &PiModelArgs) -> Option<Self> {
+        if args.no_restore_focus {
+            return None;
+        }
+        let session = std::env::var("REX_SESSION").ok()?;
+        let rex_bin = std::env::var_os("REX_BIN_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| args.rex_bin.clone());
+        Some(Self {
+            rex_bin,
+            session,
+            block: args.block.clone(),
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RexFocusGuard {
+    fn drop(&mut self) {
+        let _ = ProcessCommand::new(&self.rex_bin)
+            .arg("--autostart=false")
+            .arg("focus")
+            .args(["-s", &self.session, &self.block])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 fn read_document(path: &Path) -> Result<PickerDocument> {
@@ -166,6 +280,7 @@ fn lines_document(args: &LinesArgs) -> Result<PickerDocument> {
             title: args.title.clone(),
             prompt: args.prompt.clone(),
             placeholder: args.placeholder.clone(),
+            header: None,
             footer: args.footer.clone(),
             initial_query: args.query.clone(),
             multi: args.multi,
