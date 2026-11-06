@@ -514,25 +514,30 @@ impl RexFocusGuard {
 
 #[cfg(unix)]
 impl Drop for RexFocusGuard {
+    /// Restores focus (and optionally zoom) without delaying exit.
+    ///
+    /// The commands run in order in one detached child, so the floating layer
+    /// can close immediately even if the Rex server is slow to answer. The
+    /// child gets its own process group so a terminal hangup when the layer
+    /// closes does not kill it, and it never touches the terminal.
     fn drop(&mut self) {
-        let _ = ProcessCommand::new(&self.rex_bin)
-            .arg("--autostart=false")
-            .arg("focus")
-            .args(["-s", &self.session, &self.block])
+        use std::os::unix::process::CommandExt;
+
+        let mut script = String::from(r#""$0" --autostart=false focus -s "$1" "$2""#);
+        if self.restore_zoom {
+            script.push_str(r#"; "$0" --autostart=false zoom -s "$1" "$2" --on"#);
+        }
+        let _ = ProcessCommand::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .arg(&self.rex_bin)
+            .arg(&self.session)
+            .arg(&self.block)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
-        if self.restore_zoom {
-            let _ = ProcessCommand::new(&self.rex_bin)
-                .arg("--autostart=false")
-                .arg("zoom")
-                .args(["-s", &self.session, &self.block, "--on"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
+            .process_group(0)
+            .spawn();
     }
 }
 
@@ -705,5 +710,49 @@ mod tests {
         let value: Value =
             serde_json::from_slice(&fs::read(output).expect("read result")).expect("parse result");
         assert_eq!(value["selected"][0]["label"], "beta");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn focus_guard_restores_focus_then_zoom_without_waiting() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let rex = directory.path().join("rex with space");
+        let log = directory.path().join("rex.log");
+        fs::write(
+            &rex,
+            format!(
+                "#!/bin/sh\nsleep 0.2\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                log.display()
+            ),
+        )
+        .expect("fake rex");
+        fs::set_permissions(&rex, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let started = Instant::now();
+        drop(RexFocusGuard::new(
+            rex,
+            Some("session:a b".to_owned()),
+            Some("block:$x".to_owned()),
+            false,
+            true,
+        ));
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "exit must not wait for Rex"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let expected = "--autostart=false focus -s session:a b block:$x\n\
+                        --autostart=false zoom -s session:a b block:$x --on\n";
+        while Instant::now() < deadline {
+            if fs::read_to_string(&log).is_ok_and(|text| text == expected) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("focus restoration log: {:?}", fs::read_to_string(&log));
     }
 }
