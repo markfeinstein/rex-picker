@@ -34,6 +34,7 @@ pub enum ShellKind {
 #[derive(Clone, Debug)]
 struct FileCandidate {
     relative: String,
+    depth: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -64,10 +65,23 @@ impl FileSource {
         })
     }
 
+    /// Discovers at most `max_files` files, preferring the shallowest.
+    ///
+    /// The cap is deterministic: every file above the cutoff depth is kept,
+    /// plus the alphabetically first files at the cutoff depth. Parallel
+    /// walkers count files per depth and stop descending once shallower
+    /// levels already fill the cap, so large trees are pruned early.
     fn discover(&self) -> Result<Vec<FileCandidate>> {
-        let files = Arc::new(Mutex::new(Vec::new()));
-        let errors = Arc::new(Mutex::new(Vec::new()));
-        let count = Arc::new(AtomicUsize::new(0));
+        let shared = Arc::new(DiscoveryShared {
+            files: Mutex::new(Vec::new()),
+            errors: Mutex::new(Vec::new()),
+            depth_counts: (0..MAX_TRACKED_DEPTH)
+                .map(|_| AtomicUsize::new(0))
+                .collect(),
+            cutoff: AtomicUsize::new(usize::MAX),
+            deepest: AtomicUsize::new(0),
+            max_files: self.max_files,
+        });
         let mut builder = WalkBuilder::new(&self.root);
         builder
             .standard_filters(!self.include_ignored)
@@ -86,23 +100,25 @@ impl FileSource {
             // when it finishes, instead of contending on a lock per file.
             let mut visitor = DiscoveryVisitor {
                 files: Vec::new(),
-                shared_files: Arc::clone(&files),
-                errors: Arc::clone(&errors),
-                count: Arc::clone(&count),
+                shared: Arc::clone(&shared),
                 root: self.root.clone(),
-                max_files: self.max_files,
             };
             Box::new(move |entry| visitor.visit(entry))
         });
 
-        let mut files = Arc::into_inner(files)
-            .expect("file discovery workers finished")
-            .into_inner()
-            .expect("file discovery lock");
-        files.sort_unstable_by(|left, right| left.relative.cmp(&right.relative));
+        let shared = Arc::into_inner(shared).expect("file discovery workers finished");
+        let mut files = shared.files.into_inner().expect("file discovery lock");
+        files.sort_unstable_by(|left, right| {
+            (left.depth, &left.relative).cmp(&(right.depth, &right.relative))
+        });
         files.truncate(self.max_files);
+        files.sort_unstable_by(|left, right| left.relative.cmp(&right.relative));
         if files.is_empty()
-            && let Some(error) = errors.lock().expect("file discovery error lock").first()
+            && let Some(error) = shared
+                .errors
+                .into_inner()
+                .expect("file discovery error lock")
+                .first()
         {
             bail!("file discovery failed: {error}");
         }
@@ -110,13 +126,47 @@ impl FileSource {
     }
 }
 
+/// Depths beyond this share one counter; they are pruned conservatively.
+const MAX_TRACKED_DEPTH: usize = 128;
+
+struct DiscoveryShared {
+    files: Mutex<Vec<FileCandidate>>,
+    errors: Mutex<Vec<String>>,
+    /// Accepted files per walk depth.
+    depth_counts: Vec<AtomicUsize>,
+    /// Deepest level still needed; entries below it cannot make the cap.
+    cutoff: AtomicUsize,
+    /// Deepest tracked level with any file, bounding the cutoff scan.
+    deepest: AtomicUsize,
+    max_files: usize,
+}
+
+impl DiscoveryShared {
+    fn record(&self, depth: usize) {
+        let slot = depth.min(MAX_TRACKED_DEPTH - 1);
+        self.depth_counts[slot].fetch_add(1, Ordering::Relaxed);
+        let deepest = self.deepest.fetch_max(slot, Ordering::Relaxed).max(slot);
+        // Counts only grow, so once levels 0..=level hold the cap they always
+        // will, and nothing deeper can be selected.
+        let cutoff = self.cutoff.load(Ordering::Relaxed);
+        let mut total = 0;
+        let scan = deepest
+            .min(cutoff.saturating_sub(1))
+            .min(MAX_TRACKED_DEPTH - 2);
+        for (level, count) in self.depth_counts.iter().enumerate().take(scan + 1) {
+            total += count.load(Ordering::Relaxed);
+            if total >= self.max_files {
+                self.cutoff.fetch_min(level, Ordering::Relaxed);
+                break;
+            }
+        }
+    }
+}
+
 struct DiscoveryVisitor {
     files: Vec<FileCandidate>,
-    shared_files: Arc<Mutex<Vec<FileCandidate>>>,
-    errors: Arc<Mutex<Vec<String>>>,
-    count: Arc<AtomicUsize>,
+    shared: Arc<DiscoveryShared>,
     root: PathBuf,
-    max_files: usize,
 }
 
 impl DiscoveryVisitor {
@@ -124,14 +174,28 @@ impl DiscoveryVisitor {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                self.errors
+                self.shared
+                    .errors
                     .lock()
                     .expect("file discovery error lock")
                     .push(error.to_string());
                 return WalkState::Continue;
             }
         };
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+        let depth = entry.depth();
+        let cutoff = self.shared.cutoff.load(Ordering::Relaxed);
+        let Some(file_type) = entry.file_type() else {
+            return WalkState::Continue;
+        };
+        if file_type.is_dir() {
+            // Children of a directory at the cutoff are deeper than it.
+            return if depth >= cutoff {
+                WalkState::Skip
+            } else {
+                WalkState::Continue
+            };
+        }
+        if !file_type.is_file() || depth > cutoff {
             return WalkState::Continue;
         }
         let Some(relative) = entry
@@ -145,13 +209,11 @@ impl DiscoveryVisitor {
         if relative.contains(['\n', '\r']) {
             return WalkState::Continue;
         }
-        // Count only accepted files so skipped entries do not consume the cap.
-        if self.count.fetch_add(1, Ordering::Relaxed) >= self.max_files {
-            return WalkState::Quit;
-        }
         self.files.push(FileCandidate {
             relative: relative.to_owned(),
+            depth,
         });
+        self.shared.record(depth);
         WalkState::Continue
     }
 }
@@ -161,7 +223,7 @@ impl Drop for DiscoveryVisitor {
         if self.files.is_empty() {
             return;
         }
-        if let Ok(mut shared) = self.shared_files.lock() {
+        if let Ok(mut shared) = self.shared.files.lock() {
             shared.append(&mut self.files);
         }
     }
@@ -532,6 +594,44 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn caps_discovery_deterministically_by_depth_then_name() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        for name in ["b.txt", "a.txt"] {
+            fs::write(directory.path().join(name), "").expect("top-level file");
+        }
+        for branch in ["x", "y", "z"] {
+            let path = directory.path().join(branch).join("deep");
+            fs::create_dir_all(&path).expect("nested directory");
+            for index in 0..20 {
+                fs::write(
+                    directory.path().join(branch).join(format!("{index:02}")),
+                    "",
+                )
+                .expect("level-two file");
+                fs::write(path.join(format!("{index:02}")), "").expect("level-three file");
+            }
+        }
+        let mut source = FileSource::new(directory.path()).expect("source");
+        source.max_files = 25;
+
+        let expected: Vec<String> = ["a.txt", "b.txt"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain((0..20).map(|index| format!("x/{index:02}")))
+            .chain((0..3).map(|index| format!("y/{index:02}")))
+            .collect();
+        for _ in 0..10 {
+            let files: Vec<String> = source
+                .discover()
+                .expect("discovery")
+                .into_iter()
+                .map(|file| file.relative)
+                .collect();
+            assert_eq!(files, expected);
+        }
+    }
 
     #[test]
     fn quotes_paths_for_nushell_and_zsh() {

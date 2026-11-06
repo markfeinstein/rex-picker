@@ -183,7 +183,7 @@ Controls:
 - `Alt+Y`: copy selected relative paths
 - `Alt+O`: reveal selected files
 
-The adapter never follows symlinks during discovery, always excludes `.git`, caps each result set at 5,000 files, validates returned paths as relative, and quotes commands separately for Nushell and Zsh.
+The adapter never follows symlinks during discovery, always excludes `.git`, caps each result set at 5,000 files (shallowest first, then by name, so the set is stable across runs), validates returned paths as relative, and quotes commands separately for Nushell and Zsh.
 
 ## Nushell history adapter
 
