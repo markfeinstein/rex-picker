@@ -82,43 +82,17 @@ impl FileSource {
             .filter_entry(|entry| entry.depth() == 0 || entry.file_name().to_str() != Some(".git"));
         let walker = builder.build_parallel();
         walker.run(|| {
-            let files = Arc::clone(&files);
-            let errors = Arc::clone(&errors);
-            let count = Arc::clone(&count);
-            let root = self.root.clone();
-            let max_files = self.max_files;
-            Box::new(move |entry| match entry {
-                Ok(entry) => {
-                    if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-                        return WalkState::Continue;
-                    }
-                    if count.fetch_add(1, Ordering::Relaxed) >= max_files {
-                        return WalkState::Quit;
-                    }
-                    let Some(relative) =
-                        entry.path().strip_prefix(&root).ok().and_then(Path::to_str)
-                    else {
-                        return WalkState::Continue;
-                    };
-                    if relative.contains(['\n', '\r']) {
-                        return WalkState::Continue;
-                    }
-                    files
-                        .lock()
-                        .expect("file discovery lock")
-                        .push(FileCandidate {
-                            relative: relative.to_owned(),
-                        });
-                    WalkState::Continue
-                }
-                Err(error) => {
-                    errors
-                        .lock()
-                        .expect("file discovery error lock")
-                        .push(error.to_string());
-                    WalkState::Continue
-                }
-            })
+            // Each walker thread collects into its own buffer and merges once
+            // when it finishes, instead of contending on a lock per file.
+            let mut visitor = DiscoveryVisitor {
+                files: Vec::new(),
+                shared_files: Arc::clone(&files),
+                errors: Arc::clone(&errors),
+                count: Arc::clone(&count),
+                root: self.root.clone(),
+                max_files: self.max_files,
+            };
+            Box::new(move |entry| visitor.visit(entry))
         });
 
         let mut files = Arc::into_inner(files)
@@ -133,6 +107,63 @@ impl FileSource {
             bail!("file discovery failed: {error}");
         }
         Ok(files)
+    }
+}
+
+struct DiscoveryVisitor {
+    files: Vec<FileCandidate>,
+    shared_files: Arc<Mutex<Vec<FileCandidate>>>,
+    errors: Arc<Mutex<Vec<String>>>,
+    count: Arc<AtomicUsize>,
+    root: PathBuf,
+    max_files: usize,
+}
+
+impl DiscoveryVisitor {
+    fn visit(&mut self, entry: Result<ignore::DirEntry, ignore::Error>) -> WalkState {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                self.errors
+                    .lock()
+                    .expect("file discovery error lock")
+                    .push(error.to_string());
+                return WalkState::Continue;
+            }
+        };
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            return WalkState::Continue;
+        }
+        let Some(relative) = entry
+            .path()
+            .strip_prefix(&self.root)
+            .ok()
+            .and_then(Path::to_str)
+        else {
+            return WalkState::Continue;
+        };
+        if relative.contains(['\n', '\r']) {
+            return WalkState::Continue;
+        }
+        // Count only accepted files so skipped entries do not consume the cap.
+        if self.count.fetch_add(1, Ordering::Relaxed) >= self.max_files {
+            return WalkState::Quit;
+        }
+        self.files.push(FileCandidate {
+            relative: relative.to_owned(),
+        });
+        WalkState::Continue
+    }
+}
+
+impl Drop for DiscoveryVisitor {
+    fn drop(&mut self) {
+        if self.files.is_empty() {
+            return;
+        }
+        if let Ok(mut shared) = self.shared_files.lock() {
+            shared.append(&mut self.files);
+        }
     }
 }
 
@@ -451,21 +482,49 @@ impl PreviewProvider for FilePreviewProvider {
                 relative
             )));
         }
-        let truncated = bytes.len() as u64 > self.max_bytes;
+        let mut truncated = bytes.len() as u64 > self.max_bytes;
         bytes.truncate(self.max_bytes as usize);
         let text = String::from_utf8_lossy(&bytes);
-        let line_count = text.lines().count().min(self.max_lines);
-        let width = line_count.max(1).to_string().len();
-        let mut preview = String::new();
-        for (index, line) in text.lines().take(self.max_lines).enumerate() {
-            use std::fmt::Write as _;
-            let _ = writeln!(preview, "{:>width$} │ {line}", index + 1);
-        }
-        if truncated || text.lines().count() > self.max_lines {
-            preview.push_str("… preview truncated\n");
-        }
-        Ok(Some(preview))
+        let mut lines = text.lines();
+        let shown: Vec<&str> = lines.by_ref().take(self.max_lines).collect();
+        truncated |= lines.next().is_some();
+        Ok(Some(number_lines(&shown, truncated)))
     }
+}
+
+/// Formats preview lines with a line-number gutter.
+///
+/// Tabs are expanded because the terminal renderer drops control characters,
+/// which would otherwise erase indentation in tab-indented sources.
+fn number_lines(lines: &[&str], truncated: bool) -> String {
+    use std::fmt::Write as _;
+
+    const TAB_WIDTH: usize = 4;
+    let width = lines.len().max(1).to_string().len();
+    let capacity = lines
+        .iter()
+        .map(|line| line.len() + width + 4)
+        .sum::<usize>();
+    let mut preview = String::with_capacity(capacity);
+    for (index, line) in lines.iter().enumerate() {
+        let _ = write!(preview, "{:>width$} │ ", index + 1);
+        let mut column = 0;
+        for character in line.chars() {
+            if character == '\t' {
+                let spaces = TAB_WIDTH - column % TAB_WIDTH;
+                preview.extend(std::iter::repeat_n(' ', spaces));
+                column += spaces;
+            } else if !character.is_control() {
+                preview.push(character);
+                column += 1;
+            }
+        }
+        preview.push('\n');
+    }
+    if truncated {
+        preview.push_str("… preview truncated\n");
+    }
+    preview
 }
 
 #[cfg(test)]
@@ -484,6 +543,15 @@ mod tests {
             quote_for_shell("a file's name.txt", ShellKind::Zsh).expect("Zsh quote"),
             "'a file'\\''s name.txt'"
         );
+    }
+
+    #[test]
+    fn preview_expands_tabs_and_marks_truncation() {
+        assert_eq!(
+            number_lines(&["\tfn main() {}", "a\tb"], false),
+            "1 │     fn main() {}\n2 │ a   b\n"
+        );
+        assert!(number_lines(&["x"], true).ends_with("… preview truncated\n"));
     }
 
     #[test]
