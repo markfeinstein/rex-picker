@@ -8,6 +8,7 @@ The project is intentionally a **one-shot process**: Rex starts it inside a floa
 
 - Parallel fuzzy matching powered by [`nucleo`](https://github.com/helix-editor/nucleo)
 - Responsive Ratatui interface with Unicode-aware input editing
+- Theme-aware colors derived from the active terminal palette
 - Single and multi-selection
 - Structured alternate actions such as copy or background-open
 - Optional static preview pane

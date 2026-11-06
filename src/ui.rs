@@ -30,11 +30,14 @@ use crate::{PickerDocument, PickerEngine, PickerItem, PickerResult};
 const EVENT_INTERVAL: Duration = Duration::from_millis(16);
 /// Large enough to hold a full-screen frame so each draw is one write.
 const TERMINAL_BUFFER_BYTES: usize = 64 * 1024;
-const ACCENT: Color = Color::Rgb(196, 167, 231);
-const MUTED: Color = Color::Rgb(110, 106, 134);
-const SUBTLE: Color = Color::Rgb(144, 140, 170);
-const TEXT: Color = Color::Rgb(224, 222, 244);
-const SUCCESS: Color = Color::Rgb(49, 116, 143);
+// Use terminal palette slots instead of fixed dark-theme RGB values. Slot 7 is
+// the readable foreground in both light and dark palettes; named accents then
+// follow the active terminal theme without depending on its default foreground.
+const ACCENT: Color = Color::Indexed(13);
+const MUTED: Color = Color::Indexed(7);
+const SUBTLE: Color = Color::Indexed(7);
+const TEXT: Color = Color::Indexed(7);
+const SUCCESS: Color = Color::Indexed(2);
 
 /// Adapter-provided lazy preview loader.
 pub trait PreviewProvider: Send + Sync + 'static {
@@ -1130,6 +1133,15 @@ mod tests {
     use crossterm::event::KeyEvent;
 
     use super::*;
+
+    #[test]
+    fn ui_colors_follow_terminal_palette_slots() {
+        assert_eq!(ACCENT, Color::Indexed(13));
+        assert_eq!(MUTED, Color::Indexed(7));
+        assert_eq!(SUBTLE, Color::Indexed(7));
+        assert_eq!(TEXT, Color::Indexed(7));
+        assert_eq!(SUCCESS, Color::Indexed(2));
+    }
 
     #[test]
     fn converts_character_positions_to_byte_offsets() {
