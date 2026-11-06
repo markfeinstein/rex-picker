@@ -87,7 +87,7 @@ Controls supplied by the extension's capabilities:
 - `Enter`: ask Pi to select the highlighted model and pinned thinking level
 - `Escape`: cancel
 
-Scope and refresh replace the candidate document in place while preserving the fuzzy query. Pi remains authoritative: the extension validates availability, authentication, and scoped thinking-level pins before applying a selection.
+The picker opens immediately and loads the list in the background. List loads, scope switches, and refreshes run off the render thread with a footer status, so typing and Escape stay responsive. Scope and refresh replace the candidate document in place while preserving the fuzzy query. Pi remains authoritative: the extension validates availability, authentication, and scoped thinking-level pins before applying a selection.
 
 Useful options:
 
@@ -171,7 +171,7 @@ rex-picker file "$REX_SESSION" "$REX_BLOCK" "$PWD" nu
 rex-picker file "$REX_SESSION" "$REX_BLOCK" "$PWD" zsh
 ```
 
-The initial filesystem walk runs off the render thread. File matching uses the same Nucleo index as every other adapter, while previews are loaded lazily by a dedicated worker only for the highlighted item. Text previews include line numbers and bounded reads; binary files show metadata without dumping bytes.
+The initial filesystem walk and the hidden/ignored rescans run off the render thread. File matching uses the same Nucleo index as every other adapter, while previews are loaded lazily by a dedicated worker only for the highlighted item. Text previews include line numbers and bounded reads; binary files show metadata without dumping bytes.
 
 Controls:
 
@@ -304,6 +304,7 @@ This avoids building a large configuration language that merely recreates `fzf` 
 
 - Candidate text is converted to Nucleo's UTF-32 representation once during injection.
 - Matching runs on a bounded worker pool and never blocks the terminal event loop for more than a small tick budget.
+- Adapter loads and slow actions run on worker threads; the screen redraws only when input, matches, previews, or background work change it.
 - The UI renders only the visible result window.
 - Query extension is marked as an append operation, allowing Nucleo to reuse previous matching work.
 - The release profile uses thin LTO, one codegen unit, and symbol stripping.

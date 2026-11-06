@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult};
+use crate::{ActionHandler, PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult};
 
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const TOGGLE_SCOPE_ACTION: &str = "toggle-scope";
@@ -286,6 +286,50 @@ impl PiModelAdapter {
             }
             action => bail!("unsupported Pi model-picker action {action:?}"),
         }
+    }
+}
+
+impl ActionHandler for PiModelAdapter {
+    fn handle_result(&mut self, result: &PickerResult) -> Result<Option<PickerDocument>> {
+        PiModelAdapter::handle_result(self, result)
+    }
+
+    /// List requests may wait on the session, and refresh can take tens of
+    /// seconds while providers are queried. Selection stays inline so that
+    /// cancelling can never abandon a request whose outcome is unknown.
+    fn background_status(&self, result: &PickerResult) -> Option<String> {
+        match result.action.as_str() {
+            TOGGLE_SCOPE_ACTION => Some("Switching scope…".to_owned()),
+            REFRESH_ACTION => Some("Refreshing provider catalogs…".to_owned()),
+            _ => None,
+        }
+    }
+}
+
+/// Returns a placeholder that renders while the first model list loads.
+pub fn loading_model_document(refresh: bool) -> PickerDocument {
+    PickerDocument {
+        version: 1,
+        options: PickerOptions {
+            title: Some("Pi Model Picker".to_owned()),
+            prompt: "› ".to_owned(),
+            placeholder: "Filter models".to_owned(),
+            header: Some(
+                if refresh {
+                    "Refreshing provider catalogs…"
+                } else {
+                    "Loading models…"
+                }
+                .to_owned(),
+            ),
+            footer: None,
+            initial_query: String::new(),
+            multi: false,
+            preview_visible: true,
+            max_visible: 12,
+            actions: Vec::new(),
+        },
+        items: Vec::new(),
     }
 }
 

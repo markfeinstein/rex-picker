@@ -1,12 +1,15 @@
 use std::{
     fs::OpenOptions,
     io::{self, BufWriter, Write},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, TryRecvError},
+    },
     thread,
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -93,6 +96,184 @@ where
     F: FnMut(&PickerResult) -> Result<Option<PickerDocument>>,
     U: FnMut() -> Result<Option<PickerDocument>>,
 {
+    run_core(
+        document,
+        preview_provider,
+        None,
+        || Ok(updates()?.map(Update::Document)),
+        |result| {
+            Ok(match handler(result)? {
+                Some(document) => Dispatch::Replace(document),
+                None => Dispatch::Finish,
+            })
+        },
+    )
+}
+
+/// An adapter whose slow actions can run without freezing the picker.
+///
+/// The picker keeps rendering and accepting query edits, navigation, and
+/// cancellation while a background action runs; other actions and Enter are
+/// ignored until it finishes. The returned status is shown in the footer.
+pub trait ActionHandler: Send + 'static {
+    /// Applies an action; see [`run_picker_with_handler`] for the meaning of
+    /// the returned document.
+    fn handle_result(&mut self, result: &PickerResult) -> Result<Option<PickerDocument>>;
+
+    /// Returns a status message when `result` should run on a worker thread,
+    /// or `None` to run it inline. Actions that need the terminal, such as
+    /// launching an editor, must run inline.
+    fn background_status(&self, _result: &PickerResult) -> Option<String> {
+        None
+    }
+}
+
+type LoadFn<H> = Box<dyn FnOnce(&mut H) -> Result<PickerDocument> + Send>;
+
+/// A document load that runs on a worker thread after the picker appears.
+pub struct BackgroundLoad<H> {
+    /// Footer status shown while loading.
+    pub status: String,
+    /// Produces the first real document.
+    pub load: LoadFn<H>,
+}
+
+impl<H> BackgroundLoad<H> {
+    pub fn new(
+        status: impl Into<String>,
+        load: impl FnOnce(&mut H) -> Result<PickerDocument> + Send + 'static,
+    ) -> Self {
+        Self {
+            status: status.into(),
+            load: Box::new(load),
+        }
+    }
+}
+
+/// Runs a picker whose adapter may perform slow work off the render thread.
+///
+/// `document` is shown immediately. When `initial_load` is provided it runs
+/// on a worker thread and replaces that placeholder document when finished.
+pub fn run_picker_with_actions<H: ActionHandler>(
+    document: PickerDocument,
+    handler: H,
+    initial_load: Option<BackgroundLoad<H>>,
+    preview_provider: Option<Arc<dyn PreviewProvider>>,
+) -> Result<Option<PickerResult>> {
+    let handler = Arc::new(Mutex::new(handler));
+    let (sender, receiver) = mpsc::channel::<JobOutcome>();
+    let mut pending = false;
+
+    let initial_busy = initial_load.map(|load| {
+        let handler = Arc::clone(&handler);
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let outcome = (load.load)(&mut lock_handler(&handler)).map(Some);
+            let _ = sender.send(JobOutcome {
+                result: None,
+                outcome,
+            });
+        });
+        pending = true;
+        load.status
+    });
+
+    let poll_handler = Arc::clone(&handler);
+    let pending = std::cell::Cell::new(pending);
+    run_core(
+        document,
+        preview_provider,
+        initial_busy,
+        || {
+            if !pending.get() {
+                return Ok(None);
+            }
+            let job = match receiver.try_recv() {
+                Ok(job) => job,
+                Err(TryRecvError::Empty) => return Ok(None),
+                Err(TryRecvError::Disconnected) => {
+                    bail!("picker background worker exited without a result")
+                }
+            };
+            pending.set(false);
+            Ok(Some(match (job.outcome?, job.result) {
+                (Some(document), _) => Update::Document(document),
+                (None, Some(result)) if !result.selected.is_empty() => Update::Finish(result),
+                (None, _) => Update::Idle,
+            }))
+        },
+        |result| {
+            let status = lock_handler(&poll_handler).background_status(result);
+            let Some(status) = status else {
+                return Ok(match lock_handler(&poll_handler).handle_result(result)? {
+                    Some(document) => Dispatch::Replace(document),
+                    None => Dispatch::Finish,
+                });
+            };
+            let handler = Arc::clone(&poll_handler);
+            let sender = sender.clone();
+            let result = result.clone();
+            thread::spawn(move || {
+                let outcome = lock_handler(&handler).handle_result(&result);
+                let _ = sender.send(JobOutcome {
+                    result: Some(result),
+                    outcome,
+                });
+            });
+            pending.set(true);
+            Ok(Dispatch::Busy(status))
+        },
+    )
+}
+
+fn lock_handler<H>(handler: &Mutex<H>) -> std::sync::MutexGuard<'_, H> {
+    // A panicked worker already reported failure through the channel; the
+    // adapter state is still the best information available.
+    handler
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct JobOutcome {
+    /// The action that started the job, or `None` for an initial load.
+    result: Option<PickerResult>,
+    outcome: Result<Option<PickerDocument>>,
+}
+
+/// Asynchronous changes delivered to a running picker.
+enum Update {
+    /// Replace the candidate document and clear any busy status.
+    Document(PickerDocument),
+    /// Close the picker with this accepted result.
+    Finish(PickerResult),
+    /// Background work finished without changing the document.
+    Idle,
+}
+
+/// How the runtime should continue after an action.
+enum Dispatch {
+    Replace(PickerDocument),
+    Finish,
+    Busy(String),
+}
+
+enum Exit {
+    Cancel,
+    Action(PickerResult),
+    Finish(PickerResult),
+}
+
+fn run_core<P, D>(
+    document: PickerDocument,
+    preview_provider: Option<Arc<dyn PreviewProvider>>,
+    initial_busy: Option<String>,
+    mut poll: P,
+    mut dispatch: D,
+) -> Result<Option<PickerResult>>
+where
+    P: FnMut() -> Result<Option<Update>>,
+    D: FnMut(&PickerResult) -> Result<Dispatch>,
+{
     document.validate().map_err(anyhow::Error::msg)?;
 
     let mut engine = PickerEngine::new(document.items, document.options.multi);
@@ -100,14 +281,18 @@ where
 
     let mut terminal = TerminalSession::new()?;
     let mut app = PickerApp::new(engine, document.options, preview_provider);
+    app.busy = initial_busy;
     loop {
-        let Some(result) = app.run(&mut terminal.terminal, &mut updates)? else {
-            return Ok(None);
+        let result = match app.run(&mut terminal.terminal, &mut poll)? {
+            Exit::Cancel => return Ok(None),
+            Exit::Finish(result) => return Ok(Some(result)),
+            Exit::Action(result) => result,
         };
-        match handler(&result)? {
-            Some(replacement) => app.replace_document(replacement)?,
-            None if result.selected.is_empty() => {}
-            None => return Ok(Some(result)),
+        match dispatch(&result)? {
+            Dispatch::Replace(replacement) => app.replace_document(replacement)?,
+            Dispatch::Finish if result.selected.is_empty() => {}
+            Dispatch::Finish => return Ok(Some(result)),
+            Dispatch::Busy(status) => app.busy = Some(status),
         }
     }
 }
@@ -228,6 +413,8 @@ struct PickerApp {
     preview_item_id: Option<String>,
     dynamic_preview: Option<String>,
     preview_loading: bool,
+    /// Status of running background work; actions are paused while set.
+    busy: Option<String>,
 }
 
 impl PickerApp {
@@ -246,6 +433,7 @@ impl PickerApp {
             preview_item_id: None,
             dynamic_preview: None,
             preview_loading: false,
+            busy: None,
         }
     }
 
@@ -261,19 +449,24 @@ impl PickerApp {
         Ok(())
     }
 
-    fn run<U>(
-        &mut self,
-        terminal: &mut PickerTerminal,
-        updates: &mut U,
-    ) -> Result<Option<PickerResult>>
+    fn run<P>(&mut self, terminal: &mut PickerTerminal, poll: &mut P) -> Result<Exit>
     where
-        U: FnMut() -> Result<Option<PickerDocument>>,
+        P: FnMut() -> Result<Option<Update>>,
     {
         let mut dirty = true;
         loop {
-            if let Some(document) = updates()? {
-                self.replace_document(document)?;
-                dirty = true;
+            match poll()? {
+                Some(Update::Document(document)) => {
+                    self.replace_document(document)?;
+                    self.busy = None;
+                    dirty = true;
+                }
+                Some(Update::Finish(result)) => return Ok(Exit::Finish(result)),
+                Some(Update::Idle) => {
+                    self.busy = None;
+                    dirty = true;
+                }
+                None => {}
             }
             dirty |= self.engine.tick(2).changed;
             dirty |= self.poll_preview();
@@ -299,7 +492,10 @@ impl PickerApp {
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                     {
                         if let Some(outcome) = self.handle_key(key) {
-                            return Ok(outcome);
+                            return Ok(match outcome {
+                                Some(result) => Exit::Action(result),
+                                None => Exit::Cancel,
+                            });
                         }
                         dirty = true;
                     }
@@ -382,10 +578,14 @@ impl PickerApp {
         }
 
         if let Some(action) = self.action_for_key(key) {
+            if self.busy.is_some() {
+                return None;
+            }
             return Some(Some(self.engine.action_result(action)));
         }
 
         match (key.code, key.modifiers) {
+            (KeyCode::Enter, _) if self.busy.is_some() => None,
             // Enter with no matching row keeps the picker open rather than
             // silently exiting as though the user had cancelled.
             (KeyCode::Enter, _) => self.engine.result("accept").map(Some),
@@ -710,6 +910,9 @@ impl PickerApp {
 
     fn footer_parts(&self) -> Vec<String> {
         let mut parts = Vec::new();
+        if let Some(busy) = &self.busy {
+            parts.push(format!("⟳ {busy}"));
+        }
         if let Some(footer) = &self.options.footer {
             parts.push(footer.clone());
         }
@@ -999,5 +1202,51 @@ mod tests {
             .expect("action is not a cancellation");
         assert_eq!(outcome.action, "refresh");
         assert!(outcome.selected.is_empty());
+    }
+
+    #[test]
+    fn busy_status_pauses_actions_but_not_editing() {
+        let options = crate::PickerOptions {
+            actions: vec![crate::PickerAction {
+                id: "refresh".to_owned(),
+                key: "ctrl-r".to_owned(),
+                label: "refresh".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let mut engine = PickerEngine::new(
+            vec![PickerItem {
+                id: "a".to_owned(),
+                label: "alpha".to_owned(),
+                description: None,
+                search_text: None,
+                preview: None,
+                metadata: serde_json::Value::Null,
+            }],
+            false,
+        );
+        engine.settle();
+        let mut app = PickerApp::new(engine, options, None);
+        app.busy = Some("Refreshing".to_owned());
+
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(app.engine.query(), "a");
+        assert!(app.footer_lines(80)[0].starts_with("⟳ Refreshing"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(None)
+        );
     }
 }

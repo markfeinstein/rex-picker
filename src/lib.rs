@@ -17,6 +17,6 @@ pub use protocol::{
     PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, PickerSelection,
 };
 pub use ui::{
-    PreviewProvider, run_picker, run_picker_runtime, run_picker_runtime_with_preview,
-    run_picker_with_handler,
+    ActionHandler, BackgroundLoad, PreviewProvider, run_picker, run_picker_runtime,
+    run_picker_runtime_with_preview, run_picker_with_actions, run_picker_with_handler,
 };

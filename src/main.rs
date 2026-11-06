@@ -5,11 +5,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode, Stdio},
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, TryRecvError},
-    },
-    thread,
+    sync::Arc,
     time::Duration,
 };
 
@@ -20,12 +16,14 @@ use rex_picker::adapters::{
     file::{FilePickerAdapter, FilePreviewProvider, FileSource, ShellKind, loading_file_document},
     history::HistoryAdapter,
     password::{PasswordActionHandler, PasswordStoreSource},
-    pi_model::{PiModelAdapter, PiModelClient, PiModelScope},
+    pi_model::{PiModelAdapter, PiModelClient, PiModelScope, loading_model_document},
     url::{RexUrlSource, UrlActionHandler, loading_url_document},
 };
+#[cfg(unix)]
+use rex_picker::{BackgroundLoad, run_picker_with_actions, run_picker_with_handler};
 use rex_picker::{
     PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, fs_util::write_atomic,
-    run_picker, run_picker_runtime, run_picker_runtime_with_preview, run_picker_with_handler,
+    run_picker,
 };
 use serde_json::json;
 
@@ -335,7 +333,7 @@ fn run_file_picker(args: FileArgs) -> Result<()> {
         false,
     );
     let preview = Arc::new(FilePreviewProvider::new(&args.working_directory)?);
-    let adapter = Arc::new(Mutex::new(FilePickerAdapter::new(
+    let adapter = FilePickerAdapter::new(
         FileSource::new(&args.working_directory)?,
         rex_bin,
         args.session,
@@ -343,38 +341,14 @@ fn run_file_picker(args: FileArgs) -> Result<()> {
         args.shell.into(),
         args.clipboard_bin,
         args.open_bin,
-    )));
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let loader = Arc::clone(&adapter);
-    thread::spawn(move || {
-        let result = loader.lock().expect("file adapter lock").load();
-        let _ = sender.send(result);
-    });
-    let mut discovery_complete = false;
-
-    run_picker_runtime_with_preview(
+    );
+    run_picker_with_actions(
         loading_file_document(),
-        |result| {
-            adapter
-                .lock()
-                .expect("file adapter lock")
-                .handle_result(result)
-        },
-        || {
-            if discovery_complete {
-                return Ok(None);
-            }
-            match receiver.try_recv() {
-                Ok(result) => {
-                    discovery_complete = true;
-                    result.map(Some)
-                }
-                Err(TryRecvError::Empty) => Ok(None),
-                Err(TryRecvError::Disconnected) => {
-                    bail!("file discovery worker exited without returning a result")
-                }
-            }
-        },
+        adapter,
+        Some(BackgroundLoad::new(
+            "Discovering files…",
+            FilePickerAdapter::load,
+        )),
         Some(preview),
     )?;
     Ok(())
@@ -460,9 +434,21 @@ fn run_pi_model(args: PiModelArgs) -> Result<()> {
         Duration::from_millis(args.timeout_ms),
         Duration::from_millis(args.refresh_timeout_ms),
     );
-    let mut adapter = PiModelAdapter::new(client, args.scope.map(Into::into));
-    let document = adapter.load(args.refresh)?;
-    run_picker_with_handler(document, |result| adapter.handle_result(result))?;
+    let adapter = PiModelAdapter::new(client, args.scope.map(Into::into));
+    let refresh = args.refresh;
+    run_picker_with_actions(
+        loading_model_document(refresh),
+        adapter,
+        Some(BackgroundLoad::new(
+            if refresh {
+                "Refreshing provider catalogs…"
+            } else {
+                "Loading models…"
+            },
+            move |adapter: &mut PiModelAdapter| adapter.load(refresh),
+        )),
+        None,
+    )?;
     Ok(())
 }
 
@@ -478,30 +464,14 @@ fn run_url_picker(args: UrlArgs) -> Result<()> {
     );
     let source = RexUrlSource::new(rex_bin, args.session, args.block);
     let handler = UrlActionHandler::new(args.open_bin, args.clipboard_bin);
-    let (sender, receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let _ = sender.send(source.load_document());
-    });
-    let mut capture_complete = false;
-
-    run_picker_runtime(
+    run_picker_with_actions(
         loading_url_document(),
-        |result| handler.handle_result(result),
-        || {
-            if capture_complete {
-                return Ok(None);
-            }
-            match receiver.try_recv() {
-                Ok(result) => {
-                    capture_complete = true;
-                    result.map(Some)
-                }
-                Err(TryRecvError::Empty) => Ok(None),
-                Err(TryRecvError::Disconnected) => {
-                    bail!("URL capture worker exited without returning a result")
-                }
-            }
-        },
+        handler,
+        Some(BackgroundLoad::new(
+            "Capturing scrollback…",
+            move |_: &mut UrlActionHandler| source.load_document(),
+        )),
+        None,
     )?;
     Ok(())
 }

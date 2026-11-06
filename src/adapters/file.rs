@@ -15,7 +15,8 @@ use ignore::{WalkBuilder, WalkState};
 use serde_json::{Value, json};
 
 use crate::{
-    PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, PreviewProvider,
+    ActionHandler, PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult,
+    PreviewProvider,
 };
 
 const MAX_FILES: usize = 5_000;
@@ -414,6 +415,19 @@ impl FilePickerAdapter {
             bail!("{} command failed", self.rex_bin.display());
         }
         Ok(())
+    }
+}
+
+impl ActionHandler for FilePickerAdapter {
+    fn handle_result(&mut self, result: &PickerResult) -> Result<Option<PickerDocument>> {
+        FilePickerAdapter::handle_result(self, result)
+    }
+
+    fn background_status(&self, result: &PickerResult) -> Option<String> {
+        match result.action.as_str() {
+            TOGGLE_HIDDEN_ACTION | TOGGLE_IGNORED_ACTION => Some("Rescanning files…".to_owned()),
+            _ => None,
+        }
     }
 }
 

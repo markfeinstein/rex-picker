@@ -19,7 +19,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::{PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult};
+use crate::{ActionHandler, PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult};
 
 const LINE_LIMIT: usize = 20_000;
 const FORMAT_PROBE_BYTES: usize = 1_024;
@@ -213,6 +213,12 @@ impl UrlActionHandler {
             action => bail!("unsupported URL picker action {action:?}"),
         }?;
         Ok(None)
+    }
+}
+
+impl ActionHandler for UrlActionHandler {
+    fn handle_result(&mut self, result: &PickerResult) -> Result<Option<PickerDocument>> {
+        UrlActionHandler::handle_result(self, result)
     }
 }
 
