@@ -335,6 +335,7 @@ impl PiModelList {
                 footer: Some(footer),
                 initial_query: String::new(),
                 multi: false,
+                preview_visible: true,
                 max_visible: 12,
                 actions,
             },

@@ -162,6 +162,29 @@ pass show --clip ENTRY
 
 The child process's standard output and error are suppressed so a misbehaving pass-compatible implementation cannot render secret material in the floating terminal. Use `--pass-bin` or `--store` for alternate implementations and locations.
 
+## File adapter
+
+Discover files natively and inject a shell-safe Neovim command into the originating Rex block:
+
+```sh
+rex-picker file "$REX_SESSION" "$REX_BLOCK" "$PWD" nu
+rex-picker file "$REX_SESSION" "$REX_BLOCK" "$PWD" zsh
+```
+
+The initial filesystem walk runs off the render thread. File matching uses the same Nucleo index as every other adapter, while previews are loaded lazily by a dedicated worker only for the highlighted item. Text previews include line numbers and bounded reads; binary files show metadata without dumping bytes.
+
+Controls:
+
+- `Tab`: select multiple files
+- `Enter`: open with `nvim`, using `-O2` for multiple selections
+- `Alt+.`: toggle hidden files
+- `Alt+I`: toggle ignored files
+- `Alt+V`: toggle preview
+- `Alt+Y`: copy selected relative paths
+- `Alt+O`: reveal selected files
+
+The adapter never follows symlinks during discovery, always excludes `.git`, caps each result set at 5,000 files, validates returned paths as relative, and quotes commands separately for Nushell and Zsh.
+
 ## JSON protocol
 
 ```sh
@@ -276,8 +299,7 @@ The benchmark covers construction, indexing, and matching at 100, 1,000, and 5,0
 
 ## Planned adapters
 
-1. File discovery, multi-select, and dynamic preview
-2. Nushell history scopes and edit/insert/run actions
+1. Nushell history scopes and edit/insert/run actions
 
 The file adapter is intentionally later: hidden/ignored toggles, streaming discovery, preview cancellation, multi-selection, and shell-safe result injection need explicit designs rather than a premature generic command DSL.
 

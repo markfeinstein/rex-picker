@@ -19,6 +19,10 @@ fn default_max_visible() -> usize {
     12
 }
 
+fn default_preview_visible() -> bool {
+    true
+}
+
 /// A complete picker invocation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PickerDocument {
@@ -96,6 +100,9 @@ pub struct PickerOptions {
     /// Allow selecting more than one item.
     #[serde(default)]
     pub multi: bool,
+    /// Whether an available preview should be rendered.
+    #[serde(default = "default_preview_visible")]
+    pub preview_visible: bool,
     /// Maximum rows shown at once.
     #[serde(default = "default_max_visible")]
     pub max_visible: usize,
@@ -114,6 +121,7 @@ impl Default for PickerOptions {
             footer: None,
             initial_query: String::new(),
             multi: false,
+            preview_visible: default_preview_visible(),
             max_visible: default_max_visible(),
             actions: Vec::new(),
         }

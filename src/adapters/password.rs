@@ -56,6 +56,7 @@ impl PasswordStoreSource {
                 footer: Some("Secret values are never rendered".to_owned()),
                 initial_query: String::new(),
                 multi: false,
+                preview_visible: true,
                 max_visible: 14,
                 actions: Vec::new(),
             },

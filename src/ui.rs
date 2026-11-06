@@ -1,6 +1,8 @@
 use std::{
     fs::OpenOptions,
     io::{self, Write},
+    sync::{Arc, mpsc},
+    thread,
     time::Duration,
 };
 
@@ -20,7 +22,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::{PickerDocument, PickerEngine, PickerResult};
+use crate::{PickerDocument, PickerEngine, PickerItem, PickerResult};
 
 const EVENT_INTERVAL: Duration = Duration::from_millis(16);
 const ACCENT: Color = Color::Rgb(196, 167, 231);
@@ -28,6 +30,11 @@ const MUTED: Color = Color::Rgb(110, 106, 134);
 const SUBTLE: Color = Color::Rgb(144, 140, 170);
 const TEXT: Color = Color::Rgb(224, 222, 244);
 const SUCCESS: Color = Color::Rgb(49, 116, 143);
+
+/// Adapter-provided lazy preview loader.
+pub trait PreviewProvider: Send + Sync + 'static {
+    fn load(&self, item: &PickerItem) -> Result<Option<String>>;
+}
 
 /// Runs a picker in the current terminal.
 ///
@@ -58,8 +65,22 @@ where
 /// the loading document without blocking keyboard input or rendering.
 pub fn run_picker_runtime<F, U>(
     document: PickerDocument,
+    handler: F,
+    updates: U,
+) -> Result<Option<PickerResult>>
+where
+    F: FnMut(&PickerResult) -> Result<Option<PickerDocument>>,
+    U: FnMut() -> Result<Option<PickerDocument>>,
+{
+    run_picker_runtime_with_preview(document, handler, updates, None)
+}
+
+/// Runs a picker with an optional lazy preview provider.
+pub fn run_picker_runtime_with_preview<F, U>(
+    document: PickerDocument,
     mut handler: F,
     mut updates: U,
+    preview_provider: Option<Arc<dyn PreviewProvider>>,
 ) -> Result<Option<PickerResult>>
 where
     F: FnMut(&PickerResult) -> Result<Option<PickerDocument>>,
@@ -71,7 +92,7 @@ where
     engine.set_query(document.options.initial_query.clone());
 
     let mut terminal = TerminalSession::new()?;
-    let mut app = PickerApp::new(engine, document.options);
+    let mut app = PickerApp::new(engine, document.options, preview_provider);
     loop {
         let Some(result) = app.run(&mut terminal.terminal, &mut updates)? else {
             return Ok(None);
@@ -136,19 +157,79 @@ impl Drop for TerminalSession {
     }
 }
 
+struct PreviewRequest {
+    generation: u64,
+    item: PickerItem,
+}
+
+struct PreviewResponse {
+    generation: u64,
+    item_id: String,
+    preview: Result<Option<String>>,
+}
+
+struct PreviewWorker {
+    requests: mpsc::Sender<PreviewRequest>,
+    responses: mpsc::Receiver<PreviewResponse>,
+}
+
+impl PreviewWorker {
+    fn new(provider: Arc<dyn PreviewProvider>) -> Self {
+        let (request_sender, request_receiver) = mpsc::channel::<PreviewRequest>();
+        let (response_sender, response_receiver) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(mut request) = request_receiver.recv() {
+                while let Ok(newer) = request_receiver.try_recv() {
+                    request = newer;
+                }
+                let item_id = request.item.id.clone();
+                let preview = provider.load(&request.item);
+                if response_sender
+                    .send(PreviewResponse {
+                        generation: request.generation,
+                        item_id,
+                        preview,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self {
+            requests: request_sender,
+            responses: response_receiver,
+        }
+    }
+}
+
 struct PickerApp {
     engine: PickerEngine,
     options: crate::PickerOptions,
     query_cursor: usize,
+    preview_worker: Option<PreviewWorker>,
+    preview_generation: u64,
+    preview_item_id: Option<String>,
+    dynamic_preview: Option<String>,
+    preview_loading: bool,
 }
 
 impl PickerApp {
-    fn new(engine: PickerEngine, options: crate::PickerOptions) -> Self {
+    fn new(
+        engine: PickerEngine,
+        options: crate::PickerOptions,
+        preview_provider: Option<Arc<dyn PreviewProvider>>,
+    ) -> Self {
         let query_cursor = options.initial_query.chars().count();
         Self {
             engine,
             options,
             query_cursor,
+            preview_worker: preview_provider.map(PreviewWorker::new),
+            preview_generation: 0,
+            preview_item_id: None,
+            dynamic_preview: None,
+            preview_loading: false,
         }
     }
 
@@ -159,6 +240,9 @@ impl PickerApp {
         self.engine.set_query(query);
         self.options = document.options;
         self.query_cursor = self.engine.query().chars().count();
+        self.preview_item_id = None;
+        self.dynamic_preview = None;
+        self.preview_loading = false;
         Ok(())
     }
 
@@ -175,6 +259,8 @@ impl PickerApp {
                 self.replace_document(document)?;
             }
             self.engine.tick(2);
+            self.poll_preview();
+            self.request_preview();
             terminal
                 .draw(|frame| self.render(frame))
                 .context("render picker")?;
@@ -195,6 +281,54 @@ impl PickerApp {
                 Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => {}
                 _ => {}
             }
+        }
+    }
+
+    fn request_preview(&mut self) {
+        let Some(worker) = &self.preview_worker else {
+            return;
+        };
+        if !self.options.preview_visible {
+            self.preview_item_id = None;
+            self.dynamic_preview = None;
+            self.preview_loading = false;
+            return;
+        }
+        let Some(item) = self.engine.current_item() else {
+            self.preview_item_id = None;
+            self.dynamic_preview = None;
+            self.preview_loading = false;
+            return;
+        };
+        if self.preview_item_id.as_deref() == Some(item.id.as_str()) {
+            return;
+        }
+
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.preview_item_id = Some(item.id.clone());
+        self.dynamic_preview = None;
+        self.preview_loading = true;
+        let _ = worker.requests.send(PreviewRequest {
+            generation: self.preview_generation,
+            item: item.clone(),
+        });
+    }
+
+    fn poll_preview(&mut self) {
+        let Some(worker) = &self.preview_worker else {
+            return;
+        };
+        while let Ok(response) = worker.responses.try_recv() {
+            if response.generation != self.preview_generation
+                || self.preview_item_id.as_deref() != Some(response.item_id.as_str())
+            {
+                continue;
+            }
+            self.preview_loading = false;
+            self.dynamic_preview = match response.preview {
+                Ok(preview) => preview,
+                Err(error) => Some(format!("Preview unavailable: {error:#}")),
+            };
         }
     }
 
@@ -427,10 +561,19 @@ impl PickerApp {
     }
 
     fn render_content(&self, frame: &mut Frame<'_>, area: Rect) {
-        let preview = self
-            .engine
-            .current_item()
-            .and_then(|item| item.preview.as_deref());
+        let preview = if !self.options.preview_visible {
+            None
+        } else if self.preview_worker.is_some() {
+            if self.preview_loading {
+                Some("Loading preview…")
+            } else {
+                self.dynamic_preview.as_deref()
+            }
+        } else {
+            self.engine
+                .current_item()
+                .and_then(|item| item.preview.as_deref())
+        };
         let areas = if preview.is_some() && area.width >= 80 {
             Layout::default()
                 .direction(Direction::Horizontal)
@@ -480,23 +623,26 @@ impl PickerApp {
                 continue;
             };
             let current = index == self.engine.cursor();
-            let marker = if self.options.multi {
+            let cursor = if current {
+                Span::styled("› ", Style::default().fg(ACCENT))
+            } else {
+                Span::raw("  ")
+            };
+            let selection = if self.options.multi {
                 if self.engine.is_selected(&item.id) {
                     Span::styled("✓ ", Style::default().fg(SUCCESS))
                 } else {
                     Span::raw("  ")
                 }
-            } else if current {
-                Span::styled("› ", Style::default().fg(ACCENT))
             } else {
-                Span::raw("  ")
+                Span::raw("")
             };
             let label_style = if current {
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(TEXT)
             };
-            let mut line = vec![marker, Span::styled(&item.label, label_style)];
+            let mut line = vec![cursor, selection, Span::styled(&item.label, label_style)];
             if let Some(description) = &item.description {
                 line.push(Span::styled(
                     format!("  {description}"),

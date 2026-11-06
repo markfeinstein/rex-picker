@@ -5,7 +5,10 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, ExitCode, Stdio},
-    sync::mpsc::{self, TryRecvError},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, TryRecvError},
+    },
     thread,
     time::Duration,
 };
@@ -14,13 +17,14 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
 use rex_picker::adapters::{
+    file::{FilePickerAdapter, FilePreviewProvider, FileSource, ShellKind, loading_file_document},
     password::{PasswordActionHandler, PasswordStoreSource},
     pi_model::{PiModelAdapter, PiModelClient, PiModelScope},
     url::{RexUrlSource, UrlActionHandler, loading_url_document},
 };
 use rex_picker::{
     PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, run_picker,
-    run_picker_runtime, run_picker_with_handler,
+    run_picker_runtime, run_picker_runtime_with_preview, run_picker_with_handler,
 };
 use serde_json::json;
 
@@ -33,6 +37,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Pick files and open them in Neovim through the originating Rex shell.
+    #[cfg(unix)]
+    File(FileArgs),
     /// Pick from a versioned JSON document.
     Json(JsonArgs),
     /// Pick from newline- or NUL-delimited input.
@@ -106,6 +113,50 @@ struct LinesArgs {
     /// Pretty-print the result JSON.
     #[arg(long)]
     pretty: bool,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ShellArg {
+    Nu,
+    Nushell,
+    Zsh,
+}
+
+#[cfg(unix)]
+impl From<ShellArg> for ShellKind {
+    fn from(value: ShellArg) -> Self {
+        match value {
+            ShellArg::Nu | ShellArg::Nushell => Self::Nushell,
+            ShellArg::Zsh => Self::Zsh,
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Args)]
+struct FileArgs {
+    /// Rex session containing the originating shell.
+    session: String,
+    /// Rex block containing the originating shell.
+    block: String,
+    /// Working directory whose files should be discovered.
+    working_directory: PathBuf,
+    /// Invoking shell used to quote the final Neovim command.
+    #[arg(value_enum)]
+    shell: ShellArg,
+    /// Rex CLI used to inject the editor command and restore focus.
+    #[arg(long, default_value = "rex")]
+    rex_bin: PathBuf,
+    /// Clipboard program used by Alt-Y.
+    #[arg(long, default_value = "/usr/bin/pbcopy")]
+    clipboard_bin: PathBuf,
+    /// File reveal program used by Alt-O.
+    #[arg(long, default_value = "/usr/bin/open")]
+    open_bin: PathBuf,
+    /// Do not ask Rex to restore focus to the source block on exit.
+    #[arg(long)]
+    no_restore_focus: bool,
 }
 
 #[cfg(unix)]
@@ -206,6 +257,8 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        #[cfg(unix)]
+        Command::File(args) => run_file_picker(args)?,
         Command::Json(args) => {
             let document = read_document(&args.input.input)?;
             if let Some(result) = run_picker(document)? {
@@ -229,6 +282,61 @@ fn run(cli: Cli) -> Result<()> {
             document.validate().map_err(anyhow::Error::msg)?;
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_file_picker(args: FileArgs) -> Result<()> {
+    let rex_bin = resolved_rex_bin(&args.rex_bin);
+    let _focus_guard = RexFocusGuard::new(
+        rex_bin.clone(),
+        Some(args.session.clone()),
+        Some(args.block.clone()),
+        args.no_restore_focus,
+    );
+    let preview = Arc::new(FilePreviewProvider::new(&args.working_directory)?);
+    let adapter = Arc::new(Mutex::new(FilePickerAdapter::new(
+        FileSource::new(&args.working_directory)?,
+        rex_bin,
+        args.session,
+        args.block,
+        args.shell.into(),
+        args.clipboard_bin,
+        args.open_bin,
+    )));
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let loader = Arc::clone(&adapter);
+    thread::spawn(move || {
+        let result = loader.lock().expect("file adapter lock").load();
+        let _ = sender.send(result);
+    });
+    let mut discovery_complete = false;
+
+    run_picker_runtime_with_preview(
+        loading_file_document(),
+        |result| {
+            adapter
+                .lock()
+                .expect("file adapter lock")
+                .handle_result(result)
+        },
+        || {
+            if discovery_complete {
+                return Ok(None);
+            }
+            match receiver.try_recv() {
+                Ok(result) => {
+                    discovery_complete = true;
+                    result.map(Some)
+                }
+                Err(TryRecvError::Empty) => Ok(None),
+                Err(TryRecvError::Disconnected) => {
+                    bail!("file discovery worker exited without returning a result")
+                }
+            }
+        },
+        Some(preview),
+    )?;
     Ok(())
 }
 
@@ -415,6 +523,7 @@ fn lines_document(args: &LinesArgs) -> Result<PickerDocument> {
             footer: args.footer.clone(),
             initial_query: args.query.clone(),
             multi: args.multi,
+            preview_visible: true,
             max_visible: args.max_visible,
             actions: args.action.clone(),
         },
