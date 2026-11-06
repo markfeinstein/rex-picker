@@ -97,7 +97,7 @@ rex-picker pi-model "$REX_BLOCK" --refresh
 rex-picker pi-model "$REX_BLOCK" --socket /explicit/model-picker.sock
 ```
 
-By default, the process uses `REX_SESSION` to restore focus to the originating block when it exits. Use `--no-restore-focus` when another Rex action owns focus restoration.
+By default, the process uses `REX_SESSION` to restore focus to the originating block when it exits. Pass `--restore-zoom` when the Rex action temporarily unzooms the source block before showing the float. Use `--no-restore-focus` when another Rex action owns focus restoration.
 
 A Rex terminal layer should invoke the binary directly:
 

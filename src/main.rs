@@ -253,6 +253,9 @@ struct PiModelArgs {
     /// Do not ask Rex to restore focus to the originating Pi block on exit.
     #[arg(long)]
     no_restore_focus: bool,
+    /// Re-enable zoom on the originating Pi block after the picker closes.
+    #[arg(long)]
+    restore_zoom: bool,
     /// Rex CLI used for focus restoration.
     #[arg(long, default_value = "rex")]
     rex_bin: PathBuf,
@@ -329,6 +332,7 @@ fn run_file_picker(args: FileArgs) -> Result<()> {
         Some(args.session.clone()),
         Some(args.block.clone()),
         args.no_restore_focus,
+        false,
     );
     let preview = Arc::new(FilePreviewProvider::new(&args.working_directory)?);
     let adapter = Arc::new(Mutex::new(FilePickerAdapter::new(
@@ -384,6 +388,7 @@ fn run_history_picker(args: HistoryArgs) -> Result<()> {
         Some(args.rex_session.clone()),
         Some(args.rex_block.clone()),
         args.no_restore_focus,
+        false,
     );
     let editor = args
         .editor
@@ -425,6 +430,7 @@ fn run_password_picker(args: PasswordArgs) -> Result<()> {
         std::env::var("REX_SESSION").ok(),
         args.origin_block,
         args.no_restore_focus,
+        false,
     );
     let document = PasswordStoreSource::new(store).load_document()?;
     let handler = PasswordActionHandler::new(args.pass_bin);
@@ -444,6 +450,7 @@ fn run_pi_model(args: PiModelArgs) -> Result<()> {
         std::env::var("REX_SESSION").ok(),
         Some(args.block.clone()),
         args.no_restore_focus,
+        args.restore_zoom,
     );
     let client = match args.socket {
         Some(path) => PiModelClient::new(path),
@@ -467,6 +474,7 @@ fn run_url_picker(args: UrlArgs) -> Result<()> {
         Some(args.session.clone()),
         Some(args.block.clone()),
         args.no_restore_focus,
+        false,
     );
     let source = RexUrlSource::new(rex_bin, args.session, args.block);
     let handler = UrlActionHandler::new(args.open_bin, args.clipboard_bin);
@@ -510,6 +518,7 @@ struct RexFocusGuard {
     rex_bin: PathBuf,
     session: String,
     block: String,
+    restore_zoom: bool,
 }
 
 #[cfg(unix)]
@@ -519,6 +528,7 @@ impl RexFocusGuard {
         session: Option<String>,
         block: Option<String>,
         disabled: bool,
+        restore_zoom: bool,
     ) -> Option<Self> {
         if disabled {
             return None;
@@ -527,6 +537,7 @@ impl RexFocusGuard {
             rex_bin,
             session: session?,
             block: block?,
+            restore_zoom,
         })
     }
 }
@@ -542,6 +553,16 @@ impl Drop for RexFocusGuard {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        if self.restore_zoom {
+            let _ = ProcessCommand::new(&self.rex_bin)
+                .arg("--autostart=false")
+                .arg("zoom")
+                .args(["-s", &self.session, &self.block, "--on"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 }
 
