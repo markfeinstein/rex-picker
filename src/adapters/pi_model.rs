@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    env, fs,
+    env,
     io::{Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -589,13 +589,6 @@ fn safe_block_id(block_id: &str) -> String {
             }
         })
         .collect()
-}
-
-/// Reads an existing cached list for diagnostics or instant fallback.
-pub fn read_cached_model_list(path: &Path) -> Result<PickerDocument> {
-    let response = fs::read_to_string(path)
-        .with_context(|| format!("read cached Pi model list from {}", path.display()))?;
-    Ok(parse_list_response(&response)?.into_document())
 }
 
 #[cfg(test)]
