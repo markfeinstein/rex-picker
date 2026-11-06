@@ -109,12 +109,7 @@ impl HistoryAdapter {
         connection
             .busy_timeout(BUSY_TIMEOUT)
             .context("configure Nushell history busy timeout")?;
-        connection
-            .execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_history_session_id ON history(session_id, id DESC);\n\
-                 CREATE INDEX IF NOT EXISTS idx_history_cwd_id ON history(cwd, id DESC);",
-            )
-            .context("create Nushell history indexes")?;
+        ensure_indexes(&connection);
         Ok(Self {
             connection,
             database,
@@ -378,6 +373,39 @@ impl HistoryAdapter {
     }
 }
 
+/// Indexes that keep session and workspace scans bounded on large histories.
+const HISTORY_INDEXES: [(&str, &str); 2] = [
+    (
+        "idx_history_session_id",
+        "CREATE INDEX IF NOT EXISTS idx_history_session_id ON history(session_id, id DESC)",
+    ),
+    (
+        "idx_history_cwd_id",
+        "CREATE INDEX IF NOT EXISTS idx_history_cwd_id ON history(cwd, id DESC)",
+    ),
+];
+
+/// Creates missing lookup indexes without taking a write lock on every launch.
+///
+/// The existence check is a read; a write happens only the first time. The
+/// indexes are an optimization, so failure (a read-only database, or Nushell
+/// holding the lock past the busy timeout) is ignored and queries still work.
+fn ensure_indexes(connection: &Connection) {
+    for (name, sql) in HISTORY_INDEXES {
+        let exists = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                params![name],
+                |_| Ok(()),
+            )
+            .optional()
+            .is_ok_and(|row| row.is_some());
+        if !exists {
+            let _ = connection.execute_batch(sql);
+        }
+    }
+}
+
 fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> {
     Ok(HistoryRecord {
         id: row.get(0)?,
@@ -456,5 +484,38 @@ mod tests {
     #[test]
     fn escapes_workspace_like_patterns() {
         assert_eq!(escape_like("/tmp/a_b%"), "/tmp/a\\_b\\%");
+    }
+
+    #[test]
+    fn creates_indexes_once_and_tolerates_read_only_databases() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("history.sqlite3");
+        Connection::open(&path)
+            .expect("database")
+            .execute_batch(
+                "CREATE TABLE history (id INTEGER PRIMARY KEY, session_id INTEGER, cwd TEXT)",
+            )
+            .expect("schema");
+
+        let read_only =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("read-only connection");
+        ensure_indexes(&read_only);
+
+        let connection = Connection::open(&path).expect("database");
+        let count = |connection: &Connection| -> i64 {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_history_%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count")
+        };
+        assert_eq!(count(&connection), 0);
+        ensure_indexes(&connection);
+        assert_eq!(count(&connection), 2);
+        ensure_indexes(&connection);
+        assert_eq!(count(&connection), 2);
     }
 }
