@@ -13,10 +13,13 @@ The project is intentionally a **one-shot process**: Rex starts it inside a floa
 - Optional static preview pane
 - Versioned JSON input and JSON result protocols
 - Newline- and NUL-delimited input adapter
+- Direct Pi model-picker Unix-socket adapter
+- In-place scope switching and provider-catalog refresh
+- Pi model-picker protocol 1 and protocol 2 compatibility
 - Atomic result-file replacement
 - `/dev/tty` rendering, allowing picker data and results to use standard input/output safely
 
-This repository is a foundation, not yet a drop-in replacement for the existing dotfiles pickers. Rex and Pi adapters will be added after the protocol and interaction model have proven stable.
+The Pi adapter is functional and tested against a live Rex-hosted Pi session, but this repository has not yet been wired into the dotfiles Rex action. The existing picker remains active until that separate integration is performed.
 
 ## Build
 
@@ -57,6 +60,49 @@ rex-picker lines \
   --action 'ctrl-b:background:open in background'
 ```
 
+## Pi model adapter
+
+When Pi is running in a Rex terminal block with the dotfiles model-picker extension loaded:
+
+```sh
+rex-picker pi-model "$REX_BLOCK"
+```
+
+The adapter derives the extension socket from `XDG_STATE_HOME` and the originating Rex block ID. It communicates with Pi directly—there is no Bash wrapper or `nc` subprocess.
+
+Controls supplied by the extension's capabilities:
+
+- `Tab`: toggle between all and scoped models
+- `Ctrl+R`: refresh provider model catalogs
+- `Enter`: ask Pi to select the highlighted model and pinned thinking level
+- `Escape`: cancel
+
+Scope and refresh replace the candidate document in place while preserving the fuzzy query. Pi remains authoritative: the extension validates availability, authentication, and scoped thinking-level pins before applying a selection.
+
+Useful options:
+
+```sh
+rex-picker pi-model "$REX_BLOCK" --scope scoped
+rex-picker pi-model "$REX_BLOCK" --refresh
+rex-picker pi-model "$REX_BLOCK" --socket /explicit/model-picker.sock
+```
+
+By default, the process uses `REX_SESSION` to restore focus to the originating block when it exits. Use `--no-restore-focus` when another Rex action owns focus restoration.
+
+A Rex terminal layer should invoke the binary directly:
+
+```lua
+command = { "/absolute/path/to/rex-picker", "pi-model", ctx.block_id },
+shell = "none",
+```
+
+The adapter accepts both wire formats used by the dotfiles extension:
+
+- Protocol 1: `SELECT_JSON<TAB>VISIBLE_ROW`
+- Protocol 2: `STABLE_ID<TAB>SELECT_JSON<TAB>VISIBLE_ROW`
+
+Protocol 2 capability metadata controls whether scope and refresh actions are shown. ANSI styling is sanitized, while concealed search aliases remain searchable without being rendered.
+
 ## JSON protocol
 
 ```sh
@@ -72,6 +118,7 @@ A version 1 document has picker options and stable candidate IDs:
     "title": "Pi Model Picker",
     "prompt": "› ",
     "placeholder": "Filter models",
+    "header": "MODEL  PROVIDER  CTX  INPUT/M  OUTPUT/M",
     "footer": "tab toggles scope",
     "initial_query": "",
     "multi": false,
@@ -144,7 +191,7 @@ Rex Lua action
 
 The reusable boundary is deliberately narrow:
 
-- **Core:** matching, selection, input, rendering, previews, action dispatch
+- **Core:** matching, selection, input, rendering, previews, action dispatch, in-place document replacement
 - **Adapters:** discovery, refresh, validation, and side effects
 - **Rex:** shortcut routing, float placement, and focus
 - **Pi:** authoritative model and thinking-level state
@@ -170,11 +217,10 @@ The benchmark covers construction, indexing, and matching at 100, 1,000, and 5,0
 
 ## Planned adapters
 
-1. Pi model snapshot and selection socket
-2. Rex scrollback URL extraction and URL actions
-3. Password-store entry names with `pass --clip` kept outside the renderer
-4. File discovery, multi-select, and dynamic preview
-5. Nushell history scopes and edit/insert/run actions
+1. Rex scrollback URL extraction and URL actions
+2. Password-store entry names with `pass --clip` kept outside the renderer
+3. File discovery, multi-select, and dynamic preview
+4. Nushell history scopes and edit/insert/run actions
 
 The file adapter is intentionally later: hidden/ignored toggles, streaming discovery, preview cancellation, multi-selection, and shell-safe result injection need explicit designs rather than a premature generic command DSL.
 

@@ -4,6 +4,7 @@
     "title": "Pi Model Picker",
     "prompt": "› ",
     "placeholder": "Filter models",
+    "header": "MODEL  PROVIDER  THINKING",
     "footer": "current model is listed first",
     "initial_query": "",
     "multi": false,
