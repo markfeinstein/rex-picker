@@ -316,7 +316,7 @@ Run the matching benchmark with:
 cargo bench --bench matching
 ```
 
-The benchmark covers construction, indexing, and matching at 100, 1,000, and 5,000 candidates. Adapter-specific I/O should be benchmarked separately because filesystem walking, scrollback capture, SQLite queries, previews, and external actions have different bottlenecks.
+The benchmark covers construction, indexing, and matching at 100, 1,000, and 5,000 candidates; typing a query one character at a time; and rendering a full frame with and without a 1,000-line preview. Adapter-specific I/O should be benchmarked separately because filesystem walking, scrollback capture, SQLite queries, previews, and external actions have different bottlenecks.
 
 ## Adapter status
 

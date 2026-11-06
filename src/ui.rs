@@ -297,6 +297,49 @@ where
     }
 }
 
+/// Benchmark support: renders frames of a picker into an in-memory backend.
+///
+/// Not part of the stable API.
+#[doc(hidden)]
+pub struct FrameBench {
+    app: PickerApp,
+    terminal: Terminal<ratatui::backend::TestBackend>,
+}
+
+#[doc(hidden)]
+impl FrameBench {
+    pub fn new(
+        document: PickerDocument,
+        width: u16,
+        height: u16,
+        preview: Option<Arc<dyn PreviewProvider>>,
+    ) -> Result<Self> {
+        document.validate().map_err(anyhow::Error::msg)?;
+        let mut engine = PickerEngine::new(document.items, document.options.multi);
+        engine.settle();
+        let app = PickerApp::new(engine, document.options, preview);
+        let terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height))?;
+        Ok(Self { app, terminal })
+    }
+
+    /// Sets a static preview shown beside the list, as a provider would.
+    pub fn set_preview(&mut self, preview: String) {
+        self.app.preview_loading = false;
+        self.app.dynamic_preview = Some(preview);
+    }
+
+    pub fn engine(&mut self) -> &mut PickerEngine {
+        &mut self.app.engine
+    }
+
+    pub fn draw(&mut self) -> Result<()> {
+        self.terminal
+            .draw(|frame| self.app.render(frame))
+            .context("render benchmark frame")?;
+        Ok(())
+    }
+}
+
 type TerminalWriter = Box<dyn Write>;
 type PickerTerminal = Terminal<CrosstermBackend<TerminalWriter>>;
 
