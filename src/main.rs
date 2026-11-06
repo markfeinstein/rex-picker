@@ -18,6 +18,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
 use rex_picker::adapters::{
     file::{FilePickerAdapter, FilePreviewProvider, FileSource, ShellKind, loading_file_document},
+    history::HistoryAdapter,
     password::{PasswordActionHandler, PasswordStoreSource},
     pi_model::{PiModelAdapter, PiModelClient, PiModelScope},
     url::{RexUrlSource, UrlActionHandler, loading_url_document},
@@ -40,6 +41,9 @@ enum Command {
     /// Pick files and open them in Neovim through the originating Rex shell.
     #[cfg(unix)]
     File(FileArgs),
+    /// Search Nushell SQLite history and return a run, insert, or edit result.
+    #[cfg(unix)]
+    History(HistoryArgs),
     /// Pick from a versioned JSON document.
     Json(JsonArgs),
     /// Pick from newline- or NUL-delimited input.
@@ -161,6 +165,36 @@ struct FileArgs {
 
 #[cfg(unix)]
 #[derive(Debug, Args)]
+struct HistoryArgs {
+    /// Rex session containing the originating Nushell prompt.
+    rex_session: String,
+    /// Rex block containing the originating Nushell prompt.
+    rex_block: String,
+    /// Nushell SQLite history database.
+    database: PathBuf,
+    /// Nushell history session ID.
+    history_session: i64,
+    /// Current working directory of the originating prompt.
+    working_directory: PathBuf,
+    /// Workspace root used by the workspace scope.
+    workspace: PathBuf,
+    /// Result JSON path. Pass an empty string to emit JSON on stdout.
+    result_file: String,
+    /// Query present when the picker opens.
+    initial_query: String,
+    /// Editor used by Ctrl-O. Defaults to EDITOR, then nvim.
+    #[arg(long)]
+    editor: Option<PathBuf>,
+    /// Rex CLI used to signal result readiness and restore focus.
+    #[arg(long, default_value = "rex")]
+    rex_bin: PathBuf,
+    /// Do not ask Rex to restore focus to the source block on exit.
+    #[arg(long)]
+    no_restore_focus: bool,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Args)]
 struct PasswordArgs {
     /// Password-store root. Defaults to PASSWORD_STORE_DIR or ~/.password-store.
     #[arg(long)]
@@ -259,6 +293,8 @@ fn run(cli: Cli) -> Result<()> {
     match cli.command {
         #[cfg(unix)]
         Command::File(args) => run_file_picker(args)?,
+        #[cfg(unix)]
+        Command::History(args) => run_history_picker(args)?,
         Command::Json(args) => {
             let document = read_document(&args.input.input)?;
             if let Some(result) = run_picker(document)? {
@@ -337,6 +373,41 @@ fn run_file_picker(args: FileArgs) -> Result<()> {
         },
         Some(preview),
     )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_history_picker(args: HistoryArgs) -> Result<()> {
+    let rex_bin = resolved_rex_bin(&args.rex_bin);
+    let _focus_guard = RexFocusGuard::new(
+        rex_bin.clone(),
+        Some(args.rex_session.clone()),
+        Some(args.rex_block.clone()),
+        args.no_restore_focus,
+    );
+    let editor = args
+        .editor
+        .or_else(|| std::env::var_os("EDITOR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("nvim"));
+    let result_file = (!args.result_file.is_empty()).then(|| PathBuf::from(args.result_file));
+    let mut adapter = HistoryAdapter::new(
+        args.database,
+        args.history_session,
+        args.working_directory,
+        args.workspace,
+        result_file,
+        rex_bin,
+        args.rex_session,
+        args.rex_block,
+        editor,
+        args.initial_query,
+    )?;
+    let document = adapter.load_initial()?;
+    run_picker_with_handler(document, |result| adapter.handle_result(result))?;
+    if let Some(result) = adapter.take_result() {
+        serde_json::to_writer(io::stdout().lock(), &result)?;
+        println!();
+    }
     Ok(())
 }
 

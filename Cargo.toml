@@ -19,14 +19,15 @@ ignore = "0.4.34"
 nucleo = "0.5.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 regex = "1.13.1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+tempfile = "3.27.0"
 unicode-width = "0.2.3"
 url = "2.5.8"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
-tempfile = "3.27.0"
 
 [[bench]]
 name = "matching"

@@ -185,6 +185,26 @@ Controls:
 
 The adapter never follows symlinks during discovery, always excludes `.git`, caps each result set at 5,000 files, validates returned paths as relative, and quotes commands separately for Nushell and Zsh.
 
+## Nushell history adapter
+
+Search Nushell's SQLite history using session, workspace, and global scopes:
+
+```sh
+rex-picker history \
+  "$REX_SESSION" "$REX_BLOCK" \
+  "$history_database" "$history_session_id" \
+  "$PWD" "$workspace" "$result_file" "$initial_query"
+```
+
+Controls:
+
+- `Enter`: run the selected command
+- `Tab` or `Ctrl+Y`: return it for insertion without running
+- `Ctrl+O`: edit it with `EDITOR`, then return it for insertion
+- `Ctrl+R`: cycle session, workspace, and global scopes
+
+Recent rows are queried with bounded scan limits, normalized and deduplicated in Rust, and displayed with exit status, duration, and relative age. The original command is fetched by history ID only after selection, preserving tabs and newlines. When a result file is provided, the adapter replaces it atomically and sends `F13` to the originating Rex block; an empty result-file argument emits JSON on stdout instead.
+
 ## JSON protocol
 
 ```sh
@@ -297,11 +317,9 @@ cargo bench --bench matching
 
 The benchmark covers construction, indexing, and matching at 100, 1,000, and 5,000 candidates. Adapter-specific I/O should be benchmarked separately because filesystem walking, scrollback capture, SQLite queries, previews, and external actions have different bottlenecks.
 
-## Planned adapters
+## Adapter status
 
-1. Nushell history scopes and edit/insert/run actions
-
-The file adapter is intentionally later: hidden/ignored toggles, streaming discovery, preview cancellation, multi-selection, and shell-safe result injection need explicit designs rather than a premature generic command DSL.
+The Pi model, URL, password, file, and Nushell history adapters are implemented. Dotfiles migration remains intentionally separate so each existing picker can retain a tested fallback during rollout.
 
 ## Development
 
