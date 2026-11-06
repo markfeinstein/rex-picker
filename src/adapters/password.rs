@@ -78,6 +78,11 @@ fn collect_entries(root: &Path, directory: &Path, entries: &mut Vec<String>) -> 
             continue;
         }
         if file_type.is_dir() {
+            // Match `pass ls`: hidden directories such as `.git` and
+            // `.extensions` hold no entries and can contain many objects.
+            if child.file_name().as_encoded_bytes().starts_with(b".") {
+                continue;
+            }
             collect_entries(root, &path, entries)?;
             continue;
         }
@@ -153,6 +158,8 @@ mod tests {
         fs::write(directory.path().join("Zeta.gpg"), []).expect("entry");
         fs::write(directory.path().join("nested/Alpha.gpg"), []).expect("nested entry");
         fs::write(directory.path().join("ignored.txt"), []).expect("ignored file");
+        fs::create_dir_all(directory.path().join(".git/objects")).expect("git directory");
+        fs::write(directory.path().join(".git/objects/blob.gpg"), []).expect("git object");
         symlink(
             directory.path().join("nested"),
             directory.path().join("linked"),
