@@ -38,6 +38,8 @@ const MUTED: Color = Color::Indexed(7);
 const SUBTLE: Color = Color::Indexed(7);
 const TEXT: Color = Color::Indexed(7);
 const SUCCESS: Color = Color::Indexed(2);
+const ACTIVE_BACKGROUND: Color = Color::Indexed(7);
+const ACTIVE_FOREGROUND: Color = Color::Indexed(0);
 
 /// Adapter-provided lazy preview loader.
 pub trait PreviewProvider: Send + Sync + 'static {
@@ -915,14 +917,25 @@ impl PickerApp {
                 continue;
             };
             let current = index == self.engine.cursor();
+            let active_style = Style::default().fg(ACTIVE_FOREGROUND).bg(ACTIVE_BACKGROUND);
+            let row_style = if current {
+                active_style
+            } else {
+                Style::default()
+            };
             let cursor = if current {
-                Span::styled("› ", Style::default().fg(ACCENT))
+                Span::styled("▌ ", active_style.add_modifier(Modifier::BOLD))
             } else {
                 Span::raw("  ")
             };
             let selection = if self.options.multi {
                 if self.engine.is_matched_selected(index) {
-                    Span::styled("✓ ", Style::default().fg(SUCCESS))
+                    let style = if current {
+                        active_style.add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(SUCCESS)
+                    };
+                    Span::styled("✓ ", style)
                 } else {
                     Span::raw("  ")
                 }
@@ -930,18 +943,20 @@ impl PickerApp {
                 Span::raw("")
             };
             let label_style = if current {
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                active_style.add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(TEXT)
             };
             let mut line = vec![cursor, selection, Span::styled(&item.label, label_style)];
             if let Some(description) = &item.description {
-                line.push(Span::styled(
-                    format!("  {description}"),
-                    Style::default().fg(MUTED),
-                ));
+                let description_style = if current {
+                    active_style
+                } else {
+                    Style::default().fg(MUTED)
+                };
+                line.push(Span::styled(format!("  {description}"), description_style));
             }
-            rows.push(ListItem::new(Line::from(line)));
+            rows.push(ListItem::new(Line::from(line)).style(row_style));
         }
 
         if rows.is_empty() {
@@ -1141,6 +1156,49 @@ mod tests {
         assert_eq!(SUBTLE, Color::Indexed(7));
         assert_eq!(TEXT, Color::Indexed(7));
         assert_eq!(SUCCESS, Color::Indexed(2));
+        assert_eq!(ACTIVE_BACKGROUND, Color::Indexed(7));
+        assert_eq!(ACTIVE_FOREGROUND, Color::Indexed(0));
+    }
+
+    #[test]
+    fn active_row_uses_full_width_inverted_palette() {
+        let mut engine = PickerEngine::new(
+            vec![PickerItem {
+                id: "alpha".to_owned(),
+                label: "Alpha".to_owned(),
+                description: Some("first item".to_owned()),
+                search_text: None,
+                preview: None,
+                metadata: serde_json::Value::Null,
+            }],
+            false,
+        );
+        engine.settle();
+        let app = PickerApp::new(engine, crate::PickerOptions::default(), None);
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(40, 8)).expect("test terminal");
+
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render picker");
+        let buffer = terminal.backend().buffer();
+        let cursor = buffer
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "▌")
+            .expect("active-row cursor");
+        assert_eq!(cursor.fg, ACTIVE_FOREGROUND);
+        assert_eq!(cursor.bg, ACTIVE_BACKGROUND);
+        assert!(cursor.modifier.contains(Modifier::BOLD));
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .filter(|cell| cell.bg == ACTIVE_BACKGROUND)
+                .count()
+                >= 20,
+            "active-row background did not fill the row"
+        );
     }
 
     #[test]
