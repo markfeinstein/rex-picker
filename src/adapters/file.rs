@@ -391,9 +391,54 @@ impl FilePickerAdapter {
             command.push(' ');
             command.push_str(&quote_for_shell(path, self.shell)?);
         }
+        self.check_origin()?;
         self.rex(["send-key", "-s", &self.session, "-b", &self.block, "ctrl+c"])?;
         self.rex(["send", "-s", &self.session, "-b", &self.block, &command])?;
         self.rex(["send-key", "-s", &self.session, "-b", &self.block, "enter"])?;
+        Ok(())
+    }
+
+    // Opening the float and accepting it can be minutes apart. Fail closed
+    // before sending even Ctrl+C. A Rex process snapshot isn't an atomic send.
+    fn check_origin(&self) -> Result<()> {
+        let output = Command::new(&self.rex_bin)
+            .args([
+                "--autostart=false",
+                "--timeout=3s",
+                "block",
+                "call",
+                "-s",
+                &self.session,
+                "-b",
+                &self.block,
+                "process",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .context("inspect source terminal")?;
+        if !output.status.success() {
+            bail!("cannot inspect the source block; no editor command sent");
+        }
+        let report: Value =
+            serde_json::from_slice(&output.stdout).context("decode source process")?;
+        let foreground = &report["foreground"];
+        let name = ["script", "argv0", "name"]
+            .iter()
+            .find_map(|key| foreground[key].as_str())
+            .and_then(|name| Path::new(name).file_name()?.to_str())
+            .unwrap_or("")
+            .trim_start_matches('-')
+            .trim_end_matches("-wrapped");
+        let shell_matches = matches!(
+            (self.shell, name),
+            (ShellKind::Nushell, "nu" | "nushell") | (ShellKind::Zsh, "zsh")
+        );
+        let cwd = foreground["cwd"]
+            .as_str()
+            .and_then(|dir| Path::new(dir).canonicalize().ok());
+        if !shell_matches || cwd.as_ref() != Some(&self.source.root) {
+            bail!("source shell or directory changed or is unavailable; no editor command sent");
+        }
         Ok(())
     }
 

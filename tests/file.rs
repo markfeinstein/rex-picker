@@ -96,10 +96,20 @@ fn injects_a_shell_safe_multi_file_editor_command_through_rex() {
     fs::write(directory.path().join("two.txt"), "two").expect("file two");
     let rex = directory.path().join("rex");
     let log = directory.path().join("rex.log");
+    let process = directory.path().join("process.json");
+    let report = |name: &str, cwd: &Path| {
+        fs::write(
+            &process,
+            json!({"foreground": {"name": name, "cwd": cwd}}).to_string(),
+        )
+        .unwrap();
+    };
+    report("nu", directory.path());
     executable(
         &rex,
         &format!(
-            "#!/bin/sh\nprintf '%s\\t' \"$@\" >> {}\nprintf '\\n' >> {}\n",
+            "#!/bin/sh\nif [ \"$3\" = block ]; then exec /bin/cat {}; fi\nprintf '%s\\t' \"$@\" >> {}\nprintf '\\n' >> {}\n",
+            shell_quote(&process),
             shell_quote(&log),
             shell_quote(&log),
         ),
@@ -128,10 +138,19 @@ fn injects_a_shell_safe_multi_file_editor_command_through_rex() {
     };
 
     picker.handle_result(&result).expect("open editor");
-    let calls = fs::read_to_string(log).expect("Rex calls");
+    let calls = fs::read_to_string(&log).expect("Rex calls");
     assert!(calls.contains("send-key\t-s\tsession:test\t-b\tblock:test\tctrl+c"));
     assert!(calls.contains(
         "send\t-s\tsession:test\t-b\tblock:test\tnvim -O2 -- \"one file.txt\" \"two.txt\""
     ));
     assert!(calls.contains("send-key\t-s\tsession:test\t-b\tblock:test\tenter"));
+    for (name, cwd) in [("nvim", directory.path()), ("nu", Path::new("/"))] {
+        report(name, cwd);
+        assert!(picker.handle_result(&result).is_err());
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            calls,
+            "no input on mismatch"
+        );
+    }
 }

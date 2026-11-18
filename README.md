@@ -20,7 +20,7 @@ The project is intentionally a **one-shot process**: Rex starts it inside a floa
 - Atomic result-file replacement
 - `/dev/tty` rendering, allowing picker data and results to use standard input/output safely
 
-The Pi adapter is functional and tested against a live Rex-hosted Pi session, but this repository has not yet been wired into the dotfiles Rex action. The existing picker remains active until that separate integration is performed.
+The companion dotfiles register Rex actions for the Pi model, file, URL, history, and (when enabled) password adapters.
 
 ## Build
 
@@ -183,6 +183,8 @@ Controls:
 - `Alt+V`: toggle preview
 - `Alt+Y`: copy selected relative paths
 - `Alt+O`: reveal selected files
+
+Changing preview visibility keeps the cursor and multi-selection. Rescanning keeps selected paths that still exist, in selection order. Before sending any editor input the picker checks that Rex still reports the expected foreground shell and directory; if it cannot confirm both, it exits without sending input.
 
 The adapter never follows symlinks during discovery, always excludes `.git`, caps each result set at 5,000 files (shallowest first, then by name, so the set is stable across runs), validates returned paths as relative, and quotes commands separately for Nushell and Zsh.
 
