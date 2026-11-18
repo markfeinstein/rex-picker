@@ -206,6 +206,8 @@ Controls:
 - `Ctrl+O`: edit it with `EDITOR`, then return it for insertion
 - `Ctrl+R`: cycle session, workspace, and global scopes
 
+Opening history and changing scopes run on a worker so typing and Escape stay responsive. Browsing opens the existing database read-only. For a large history, `rex-picker history-index /path/to/history.sqlite3` explicitly creates the optional session and directory lookup indexes; this maintenance command changes the database schema.
+
 Recent rows are queried with bounded scan limits, normalized and deduplicated in Rust, and displayed with exit status, duration, and relative age. The original command is fetched by history ID only after selection, preserving tabs and newlines. When a result file is provided, the adapter replaces it atomically and sends `F13` to the originating Rex block; an empty result-file argument emits JSON on stdout instead.
 
 ## JSON protocol

@@ -81,6 +81,15 @@ fn chooses_session_scope_deduplicates_and_cycles_scopes() {
     let mut adapter = adapter(&database, None, Path::new("/usr/bin/true"));
 
     let session = adapter.load_initial().expect("session history");
+    let count: i64 = Connection::open(&database)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "browsing must not create indexes");
     assert_eq!(session.options.prompt, "session history › ");
     assert_eq!(session.options.initial_query, "git");
     assert_eq!(session.items.len(), 1);

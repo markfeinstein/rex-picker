@@ -14,7 +14,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(unix)]
 use rex_picker::adapters::{
     file::{FilePickerAdapter, FilePreviewProvider, FileSource, ShellKind, loading_file_document},
-    history::HistoryAdapter,
+    history::{HistoryAdapter, index_history},
     password::{PasswordActionHandler, PasswordStoreSource},
     pi_model::{PiModelAdapter, PiModelClient, PiModelScope, loading_model_document},
     url::{RexUrlSource, UrlActionHandler, loading_url_document},
@@ -42,6 +42,9 @@ enum Command {
     /// Search Nushell SQLite history and return a run, insert, or edit result.
     #[cfg(unix)]
     History(HistoryArgs),
+    /// Explicitly add optional lookup indexes to an existing Nushell history database.
+    #[cfg(unix)]
+    HistoryIndex { database: PathBuf },
     /// Pick from a versioned JSON document.
     Json(JsonArgs),
     /// Pick from newline- or NUL-delimited input.
@@ -296,6 +299,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::File(args) => run_file_picker(args)?,
         #[cfg(unix)]
         Command::History(args) => run_history_picker(args)?,
+        #[cfg(unix)]
+        Command::HistoryIndex { database } => index_history(&database)?,
         Command::Json(args) => {
             let document = read_document(&args.input.input)?;
             if let Some(result) = run_picker(document)? {
@@ -369,25 +374,88 @@ fn run_history_picker(args: HistoryArgs) -> Result<()> {
         .or_else(|| std::env::var_os("EDITOR").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("nvim"));
     let result_file = (!args.result_file.is_empty()).then(|| PathBuf::from(args.result_file));
-    let mut adapter = HistoryAdapter::new(
-        args.database,
-        args.history_session,
-        args.working_directory,
-        args.workspace,
-        result_file,
-        rex_bin,
-        args.rex_session,
-        args.rex_block,
-        editor,
-        args.initial_query,
+    let loading = PickerDocument {
+        version: 1,
+        options: PickerOptions {
+            title: Some("Nushell History".into()),
+            initial_query: args.initial_query.clone(),
+            ..Default::default()
+        },
+        items: vec![],
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let browser = HistoryBrowser {
+        adapter: None,
+        accepted: sender,
+    };
+    let selected = run_picker_with_actions(
+        loading,
+        browser,
+        Some(BackgroundLoad::new(
+            "Loading history…",
+            move |browser: &mut HistoryBrowser| {
+                let mut adapter = HistoryAdapter::new(
+                    args.database,
+                    args.history_session,
+                    args.working_directory,
+                    args.workspace,
+                    result_file,
+                    rex_bin,
+                    args.rex_session,
+                    args.rex_block,
+                    editor,
+                    args.initial_query,
+                )?;
+                let document = adapter.load_initial()?;
+                browser.adapter = Some(adapter);
+                Ok(document)
+            },
+        )),
+        None,
     )?;
-    let document = adapter.load_initial()?;
-    run_picker_with_handler(document, |result| adapter.handle_result(result))?;
+    let Some(selected) = selected else {
+        return Ok(());
+    };
+    // Run the editor and publish the shell result only after leaving raw mode.
+    let mut adapter = receiver
+        .try_recv()
+        .context("missing accepted history browser")?;
+    adapter.handle_result(&selected)?;
     if let Some(result) = adapter.take_result() {
         serde_json::to_writer(io::stdout().lock(), &result)?;
         println!();
     }
     Ok(())
+}
+
+#[cfg(unix)]
+struct HistoryBrowser {
+    adapter: Option<HistoryAdapter>,
+    accepted: std::sync::mpsc::Sender<HistoryAdapter>,
+}
+
+#[cfg(unix)]
+impl rex_picker::ActionHandler for HistoryBrowser {
+    fn background_status(&self, result: &PickerResult) -> Option<String> {
+        (result.action == rex_picker::adapters::history::CYCLE_SCOPE_ACTION)
+            .then(|| "Loading scope…".into())
+    }
+
+    fn handle_result(&mut self, result: &PickerResult) -> Result<Option<PickerDocument>> {
+        if result.action == rex_picker::adapters::history::CYCLE_SCOPE_ACTION {
+            return self
+                .adapter
+                .as_mut()
+                .context("history not loaded")?
+                .handle_result(result);
+        }
+        if !result.selected.is_empty() {
+            self.accepted
+                .send(self.adapter.take().context("history not loaded")?)
+                .map_err(|_| anyhow::anyhow!("history receiver closed"))?;
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(unix)]

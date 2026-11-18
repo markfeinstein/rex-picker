@@ -2,13 +2,13 @@ use std::{
     collections::HashSet,
     fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -16,7 +16,7 @@ use crate::{
     PickerAction, PickerDocument, PickerItem, PickerOptions, PickerResult, fs_util::write_atomic,
 };
 
-const CYCLE_SCOPE_ACTION: &str = "cycle-scope";
+pub const CYCLE_SCOPE_ACTION: &str = "cycle-scope";
 const INSERT_TAB_ACTION: &str = "insert-tab";
 const INSERT_YANK_ACTION: &str = "insert-yank";
 const EDIT_ACTION: &str = "edit";
@@ -104,12 +104,12 @@ impl HistoryAdapter {
         initial_query: impl Into<String>,
     ) -> Result<Self> {
         let database = database.into();
-        let connection = Connection::open(&database)
-            .with_context(|| format!("open Nushell history database {}", database.display()))?;
+        let connection =
+            Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .with_context(|| format!("open Nushell history database {}", database.display()))?;
         connection
             .busy_timeout(BUSY_TIMEOUT)
             .context("configure Nushell history busy timeout")?;
-        ensure_indexes(&connection);
         Ok(Self {
             connection,
             database,
@@ -385,25 +385,17 @@ const HISTORY_INDEXES: [(&str, &str); 2] = [
     ),
 ];
 
-/// Creates missing lookup indexes without taking a write lock on every launch.
-///
-/// The existence check is a read; a write happens only the first time. The
-/// indexes are an optimization, so failure (a read-only database, or Nushell
-/// holding the lock past the busy timeout) is ignored and queries still work.
-fn ensure_indexes(connection: &Connection) {
-    for (name, sql) in HISTORY_INDEXES {
-        let exists = connection
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
-                params![name],
-                |_| Ok(()),
-            )
-            .optional()
-            .is_ok_and(|row| row.is_some());
-        if !exists {
-            let _ = connection.execute_batch(sql);
-        }
+/// Explicit maintenance operation. Never create a database on a mistyped path.
+pub fn index_history(path: &Path) -> Result<()> {
+    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .with_context(|| format!("open history for indexing: {}", path.display()))?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    let transaction = connection.transaction()?;
+    for (_, sql) in HISTORY_INDEXES {
+        transaction.execute_batch(sql)?;
     }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> {
@@ -487,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_indexes_once_and_tolerates_read_only_databases() {
+    fn explicit_indexing_is_idempotent() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("history.sqlite3");
         Connection::open(&path)
@@ -496,11 +488,6 @@ mod tests {
                 "CREATE TABLE history (id INTEGER PRIMARY KEY, session_id INTEGER, cwd TEXT)",
             )
             .expect("schema");
-
-        let read_only =
-            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .expect("read-only connection");
-        ensure_indexes(&read_only);
 
         let connection = Connection::open(&path).expect("database");
         let count = |connection: &Connection| -> i64 {
@@ -513,9 +500,9 @@ mod tests {
                 .expect("count")
         };
         assert_eq!(count(&connection), 0);
-        ensure_indexes(&connection);
+        index_history(&path).unwrap();
         assert_eq!(count(&connection), 2);
-        ensure_indexes(&connection);
+        index_history(&path).unwrap();
         assert_eq!(count(&connection), 2);
     }
 }
