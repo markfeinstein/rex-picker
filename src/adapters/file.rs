@@ -281,10 +281,6 @@ impl FilePickerAdapter {
                 self.source.include_ignored = !self.source.include_ignored;
                 self.load().map(Some)
             }
-            TOGGLE_PREVIEW_ACTION => {
-                self.preview_visible = !self.preview_visible;
-                Ok(Some(self.document()))
-            }
             COPY_ACTION | REVEAL_ACTION if result.selected.is_empty() => Ok(None),
             COPY_ACTION => {
                 let paths = self.selected_paths(result)?;
@@ -309,9 +305,8 @@ impl FilePickerAdapter {
         let items = self
             .candidates
             .iter()
-            .enumerate()
-            .map(|(index, candidate)| PickerItem {
-                id: index.to_string(),
+            .map(|candidate| PickerItem {
+                id: candidate.relative.clone(),
                 label: candidate.relative.clone(),
                 description: None,
                 search_text: None,
@@ -419,6 +414,14 @@ impl FilePickerAdapter {
 }
 
 impl ActionHandler for FilePickerAdapter {
+    fn preview_visibility(&mut self, action: &str) -> Option<bool> {
+        if action != TOGGLE_PREVIEW_ACTION {
+            return None;
+        }
+        self.preview_visible = !self.preview_visible;
+        Some(self.preview_visible)
+    }
+
     fn handle_result(&mut self, result: &PickerResult) -> Result<Option<PickerDocument>> {
         FilePickerAdapter::handle_result(self, result)
     }

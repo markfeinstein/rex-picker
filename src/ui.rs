@@ -125,6 +125,11 @@ pub trait ActionHandler: Send + 'static {
     /// the returned document.
     fn handle_result(&mut self, result: &PickerResult) -> Result<Option<PickerDocument>>;
 
+    /// Handles a display-only preview action without replacing the index or cursor.
+    fn preview_visibility(&mut self, _action: &str) -> Option<bool> {
+        None
+    }
+
     /// Returns a status message when `result` should run on a worker thread,
     /// or `None` to run it inline. Actions that need the terminal, such as
     /// launching an editor, must run inline.
@@ -208,6 +213,9 @@ pub fn run_picker_with_actions<H: ActionHandler>(
             }))
         },
         |result| {
+            if let Some(visible) = lock_handler(&poll_handler).preview_visibility(&result.action) {
+                return Ok(Dispatch::PreviewVisible(visible));
+            }
             let status = lock_handler(&poll_handler).background_status(result);
             let Some(status) = status else {
                 return Ok(match lock_handler(&poll_handler).handle_result(result)? {
@@ -257,6 +265,7 @@ enum Update {
 
 /// How the runtime should continue after an action.
 enum Dispatch {
+    PreviewVisible(bool),
     Replace(PickerDocument),
     Finish,
     Busy(String),
@@ -294,6 +303,7 @@ where
             Exit::Action(result) => result,
         };
         match dispatch(&result)? {
+            Dispatch::PreviewVisible(visible) => app.options.preview_visible = visible,
             Dispatch::Replace(replacement) => app.replace_document(replacement)?,
             Dispatch::Finish if result.selected.is_empty() => {}
             Dispatch::Finish => return Ok(Some(result)),

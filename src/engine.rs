@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::Arc, thread};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    thread,
+};
 
 use nucleo::{
     Config, Nucleo, Status, Utf32String,
@@ -52,14 +56,26 @@ impl PickerEngine {
 
     /// Replaces every candidate while keeping the query and worker pool.
     ///
-    /// Selections and the cursor are reset because candidate identities may
-    /// have changed. Reusing the matcher avoids spawning a new thread pool for
-    /// each scope switch, refresh, or asynchronous load.
+    /// Preserve explicit selections by stable ID, in selection order, not by
+    /// row number (a rescan can insert or remove earlier rows).
     pub fn replace_items(&mut self, items: Vec<PickerItem>, multi: bool) {
+        let selected = if multi && !self.selected.is_empty() {
+            let indices: HashMap<_, _> = items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| Some((item.id.as_str(), u32::try_from(i).ok()?)))
+                .collect();
+            self.selected
+                .iter()
+                .filter_map(|&old| indices.get(self.item_by_index(old)?.id.as_str()).copied())
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.matcher.restart(true);
         self.cursor = 0;
-        self.selected.clear();
-        self.selected_set.clear();
+        self.selected_set = selected.iter().copied().collect();
+        self.selected = selected;
         self.multi = multi;
         self.inject(items);
     }
@@ -358,6 +374,32 @@ mod tests {
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
             ["opus", "flash"]
+        );
+    }
+
+    #[test]
+    fn rescan_retains_surviving_ids_in_user_order() {
+        let mut engine = engine(true);
+        for _ in 0..3 {
+            engine.toggle_current();
+            engine.move_next();
+        }
+        engine.replace_items(
+            vec![
+                item("flash", "Flash", None, None),
+                item("sol", "Sol", None, None),
+            ],
+            true,
+        );
+        engine.settle();
+        let result = engine.result("accept").unwrap();
+        assert_eq!(
+            result
+                .selected
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            ["sol", "flash"]
         );
     }
 
