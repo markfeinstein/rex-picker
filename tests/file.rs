@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{env, fs, os::unix::fs::PermissionsExt, path::Path};
 
 use rex_picker::{
     PickerResult, PickerSelection,
@@ -20,7 +20,11 @@ fn shell_quote(path: &Path) -> String {
 }
 
 fn executable(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write executable");
+    let shell = env::split_paths(&env::var_os("PATH").expect("PATH"))
+        .map(|directory| directory.join("sh"))
+        .find(|candidate| candidate.is_file())
+        .expect("find sh in PATH");
+    fs::write(path, format!("#!{}\n{contents}", shell.display())).expect("write executable");
     let mut permissions = fs::metadata(path).expect("metadata").permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).expect("chmod executable");
@@ -108,7 +112,7 @@ fn injects_a_shell_safe_multi_file_editor_command_through_rex() {
     executable(
         &rex,
         &format!(
-            "#!/bin/sh\nif [ \"$3\" = block ]; then exec /bin/cat {}; fi\nprintf '%s\\t' \"$@\" >> {}\nprintf '\\n' >> {}\n",
+            "if [ \"$3\" = block ]; then exec cat {}; fi\nprintf '%s\\t' \"$@\" >> {}\nprintf '\\n' >> {}\n",
             shell_quote(&process),
             shell_quote(&log),
             shell_quote(&log),
